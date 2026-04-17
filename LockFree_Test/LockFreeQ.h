@@ -260,7 +260,6 @@ public:
 
 		TopNODE	 bTopHeadNode;
 		TopNODE	 bTopTailNode;
-		NODE* pbTailNextNode;
 		NODE* bHeadNextNode;
 		int backoff = 1;
 
@@ -268,41 +267,7 @@ public:
 		{
 			//_______________________________________________________________________________________
 			// 
-			//	tail뒤에 노드가 존재하는 경우 - 밀어준다.
-			//_______________________________________________________________________________________
-
-			// tail백업
-			bTopTailNode.UniqueCount = this->_ptail->UniqueCount;
-			bTopTailNode.pNode = this->_ptail->pNode;
-
-			// stale 감지 시 역참조+CAS 회피 (~20-40 cycles 절감)
-			if (bTopTailNode.UniqueCount != this->_ptail->UniqueCount)
-				continue;
-
-			_mm_prefetch((const char*)bTopTailNode.pNode, _MM_HINT_T0);
-
-			//tail의 Next백업
-			pbTailNextNode = bTopTailNode.pNode->pNextNode;
-
-			if (nullptr != pbTailNextNode)
-			{
-				lTailUniqueCount = InterlockedIncrement64((volatile INT64*)&this->_TailUniqueCount);
-
-				InterlockedCompareExchange128
-				(
-					(volatile INT64*)_ptail,
-					(INT64)lTailUniqueCount,
-					(INT64)pbTailNextNode,
-					(INT64*)&bTopTailNode
-				);
-				continue;
-			}
-			//_______________________________________________________________________________________
-
-
-			//_______________________________________________________________________________________
-			// 
-			//	Dequeue
+			//	head를 먼저 읽어 빈 큐 판별 — tail 캐시라인 접근 회피 (fast path)
 			//_______________________________________________________________________________________
 
 			// head 백업
@@ -317,9 +282,18 @@ public:
 
 			bHeadNextNode = bTopHeadNode.pNode->pNextNode;
 
-			// 큐가 비어있으면 실패 (호출자 책임)
+			// 큐가 비어있으면 tail 읽기 없이 즉시 반환 (호출자 책임)
 			if (bHeadNextNode == nullptr)
 				return false;
+
+			//_______________________________________________________________________________________
+			// 
+			//	head==tail 판별을 위해 tail 읽기 — 필요한 경우에만 접근
+			//_______________________________________________________________________________________
+
+			// tail백업
+			bTopTailNode.UniqueCount = this->_ptail->UniqueCount;
+			bTopTailNode.pNode = this->_ptail->pNode;
 
 			// head==tail: Enqueue 직후 tail이 안 밀린 상태 — tail push 후 재시도 (댕글링 방지)
 			if (bTopHeadNode.pNode == bTopTailNode.pNode)
@@ -335,6 +309,12 @@ public:
 				);
 				continue;
 			}
+			//_______________________________________________________________________________________
+
+			//_______________________________________________________________________________________
+			// 
+			//	Dequeue (head != tail 확정)
+			//_______________________________________________________________________________________
 
 			_mm_prefetch((const char*)bHeadNextNode, _MM_HINT_T0);
 
