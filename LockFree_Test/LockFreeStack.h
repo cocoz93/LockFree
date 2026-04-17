@@ -5,12 +5,13 @@
 #ifndef ____LOCKFREE_STACK_H____
 #define ____LOCKFREE_STACK_H____
 
+#include <atomic>
 #include "PoolFreeList.h"
 
 namespace LockFree
 {
 
-template<typename T>
+template<typename T, bool UseApproxSize = false>
 class CLockFreeStack
 {
 	struct NODE
@@ -54,6 +55,8 @@ public:
 		this->_pTopNode = (TopNODE*)_aligned_malloc(64, 64);
 		this->_pTopNode->pNode = nullptr;
 		this->_pTopNode->UniqueCount = 0;
+		if constexpr (UseApproxSize)
+			_UseSize.store(0, std::memory_order_relaxed);
 
 	}
 
@@ -80,7 +83,18 @@ public:
 public:
 	bool IsEmpty(void)
 	{
+		if constexpr (UseApproxSize)
+			return (_UseSize.load(std::memory_order_relaxed) == 0);
+
 		return this->_pTopNode->pNode == nullptr;
+	}
+
+	INT64 GetApproxSize(void) const
+	{
+		if constexpr (UseApproxSize)
+			return _UseSize.load(std::memory_order_relaxed);
+
+		return 0;
 	}
 
 	bool push(T Data)
@@ -154,6 +168,9 @@ public:
 		}
 		//_______________________________________________________________________________________
 
+		if constexpr (UseApproxSize)
+			_UseSize.fetch_add(1, std::memory_order_relaxed);
+
 		//_______________________________________________________________________________________
 		//
 		// Empty()하여 POP이 가능하다고했는데, 누군가 빼버렸을수있으나 상관X
@@ -206,6 +223,8 @@ public:
 		// CAS128()은 성공실패 여부와 관계없이 Comp쪽으로 원래(이전)노드를 뱉음
 		*pOutData = bTopNode.pNode->Data;
 		this->_pFreeList->Free(bTopNode.pNode);
+		if constexpr (UseApproxSize)
+			_UseSize.fetch_sub(1, std::memory_order_relaxed);
 
 		return true;
 	}
@@ -213,11 +232,8 @@ public:
 private:
 	CFreeList<NODE>*	_pFreeList;
 	TopNODE*			_pTopNode;
+	alignas(64) std::atomic<INT64> _UseSize;
 };
-
-template<typename T>
-using CStack = CLockFreeStack<T>;
-
 }
 
 #endif

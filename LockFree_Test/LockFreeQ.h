@@ -4,12 +4,13 @@
 #ifndef ____LOCKFREE_QUEUE_H____
 #define ____LOCKFREE_QUEUE_H____
 
+#include <atomic>
 #include "PoolFreeList.h"
 
 namespace LockFree
 {
 
-template<typename T, bool PlacementNew = false>
+template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
 class CLockFreeQ
 {
 	//-----------------------------------------------------
@@ -36,7 +37,8 @@ public:
 		_phead = nullptr;
 		_ptail = nullptr;
 		_Initialized = false;
-		_UseSize = 0;
+		if constexpr (UseApproxSize)
+			_UseSize.store(0, std::memory_order_relaxed);
 		_HeadUniqueCount = 0;
 		_TailUniqueCount = 0;
 
@@ -94,7 +96,8 @@ public:
 		_ptail->pNode = pDummy;
 		_ptail->UniqueCount = 0;
 
-		_UseSize = 0;
+		if constexpr (UseApproxSize)
+			_UseSize.store(0, std::memory_order_relaxed);
 		_HeadUniqueCount = 0;
 		_TailUniqueCount = 0;
 
@@ -136,15 +139,31 @@ public:
 		_ptail->UniqueCount = 0;
 		_ptail->pNode = _phead->pNode;
 
-		_UseSize = 0;
+		if constexpr (UseApproxSize)
+			_UseSize.store(0, std::memory_order_relaxed);
 		_HeadUniqueCount = 0;
 		_TailUniqueCount = 0;
 	}
 
-	// 락프리 특성상 정확한 사이즈 보장 불가 (스냅샷 힌트)
+	// 락프리 특성상 정확한 사이즈 보장 불가 (관측용 대략값)
 	bool IsEmpty(void)
 	{
-		return (_UseSize == 0);
+		if constexpr (UseApproxSize)
+			return (_UseSize.load(std::memory_order_relaxed) == 0);
+
+		if (_Initialized == false || _phead == nullptr)
+			return true;
+
+		return (_phead->pNode->pNextNode == nullptr);
+	}
+
+	// 모니터링/디버깅용 대략 사이즈
+	INT64 ApproxSize(void) const
+	{
+		if constexpr (UseApproxSize)
+			return _UseSize.load(std::memory_order_relaxed);
+
+		return 0;
 	}
 
 
@@ -228,7 +247,8 @@ public:
 			//_______________________________________________________________________________________
 		}
 
-		InterlockedIncrement64(&this->_UseSize);
+		if constexpr (UseApproxSize)
+			this->_UseSize.fetch_add(1, std::memory_order_relaxed);
 		return true;
 	}
 
@@ -345,7 +365,8 @@ public:
 
 		// CAS128()가 Comp쪽으로 뱉어준 원래노드를 해제
 		this->_pFreeList->Free(bTopHeadNode.pNode);
-		InterlockedDecrement64(&this->_UseSize);
+		if constexpr (UseApproxSize)
+			this->_UseSize.fetch_sub(1, std::memory_order_relaxed);
 
 		return true;
 	}
@@ -354,7 +375,7 @@ private:
 	volatile TopNODE* _phead;
 	volatile TopNODE* _ptail;
 	bool _Initialized;
-	alignas(64) volatile INT64	_UseSize;
+	alignas(64) std::atomic<INT64> _UseSize;
 	alignas(64) volatile INT64 _HeadUniqueCount;
 	alignas(64) volatile INT64 _TailUniqueCount;
 };

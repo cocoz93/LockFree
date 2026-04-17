@@ -7,6 +7,7 @@
 
 #include <windows.h>
 #include <new>
+#include <atomic>
 #include <intrin.h>
 
 #define IDENT_VAL 0x6659
@@ -16,7 +17,7 @@ namespace LockFree
 	namespace Internal
 	{
 
-		template<typename T, bool PlacementNew = false>
+		template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
 		class CPoolFreeList
 		{
 
@@ -72,6 +73,8 @@ namespace LockFree
 				hHeap = nullptr;
 				this->_Initialized = false;
 				this->_AllocCount = 0;
+				if constexpr (UseApproxSize)
+					_UseSize.store(0, std::memory_order_relaxed);
 
 				Init();
 			}
@@ -185,6 +188,9 @@ namespace LockFree
 				}
 				//_______________________________________________________________________________________
 
+				if constexpr (UseApproxSize)
+					_UseSize.fetch_add(1, std::memory_order_relaxed);
+
 				return true;
 			}
 
@@ -254,11 +260,21 @@ namespace LockFree
 				if constexpr (PlacementNew)
 					new (&rNode->Data) T;
 
+				if constexpr (UseApproxSize)
+					_UseSize.fetch_sub(1, std::memory_order_relaxed);
+
 				return NodeToData(rNode);
 			}
 		public:
 			// 총 HeapAlloc된 노드 수 (단조 증가, cold path에서만 갱신)
 			INT64 GetAllocCount() const { return _AllocCount; }
+			INT64 GetApproxSize() const
+			{
+				if constexpr (UseApproxSize)
+					return _UseSize.load(std::memory_order_relaxed);
+
+				return 0;
+			}
 
 		private:
 			TopNODE* _pTopNode;		//_allinge_malloc()
@@ -266,15 +282,16 @@ namespace LockFree
 			bool _Initialized;
 
 			alignas(64) volatile INT64	_AllocCount;	// HeapAlloc된 전체 노드 수
+			alignas(64) std::atomic<INT64> _UseSize;
 		};
 
 	}
 
-	template<typename T, bool PlacementNew = false>
-	using CPoolFreeList = Internal::CPoolFreeList<T, PlacementNew>;
+	template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
+	using CPoolFreeList = Internal::CPoolFreeList<T, PlacementNew, UseApproxSize>;
 
-	template<typename T, bool PlacementNew = false>
-	using CFreeList = CPoolFreeList<T, PlacementNew>;
+	template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
+	using CFreeList = CPoolFreeList<T, PlacementNew, UseApproxSize>;
 
 }
 

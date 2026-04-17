@@ -22,23 +22,23 @@
       <Filter>소스 파일</Filter>
     </ClCompile>
     <ClCompile Include="TestCode.cpp">
-      <Filter>소스 파일</Filter>
+      <Filter>소스 파일\LockFree::</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CrashDump.h">
       <Filter>소스 파일</Filter>
     </ClInclude>
-    <ClInclude Include="LockFreeStack.h">
-      <Filter>소스 파일</Filter>
-    </ClInclude>
-    <ClInclude Include="TlsFreeList.h">
-      <Filter>소스 파일</Filter>
-    </ClInclude>
     <ClInclude Include="PoolFreeList.h">
       <Filter>소스 파일\LockFree::</Filter>
     </ClInclude>
     <ClInclude Include="LockFreeQ.h">
+      <Filter>소스 파일\LockFree::</Filter>
+    </ClInclude>
+    <ClInclude Include="TlsFreeList.h">
+      <Filter>소스 파일\LockFree::</Filter>
+    </ClInclude>
+    <ClInclude Include="LockFreeStack.h">
       <Filter>소스 파일\LockFree::</Filter>
     </ClInclude>
   </ItemGroup>

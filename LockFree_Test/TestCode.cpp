@@ -20,9 +20,9 @@ struct TEST_DATA
 	volatile LONG64 Count;
 };
 
-LockFree::CFreeList<TEST_DATA> LockFree_FreeList;
-LockFree::CLockFreeStack<TEST_DATA> LockFreeStack;
-LockFree::CLockFreeQ<TEST_DATA> LockFreeQ;	
+LockFree::CFreeList<TEST_DATA, false, true> LockFree_FreeList;
+LockFree::CLockFreeStack<TEST_DATA, true> LockFreeStack;
+LockFree::CLockFreeQ<TEST_DATA, false, true> LockFreeQ;	
 unsigned long long* g_LoopCount;				// 테스트 과정 얼마나 돌았는가
 
 HANDLE* HandleArr;
