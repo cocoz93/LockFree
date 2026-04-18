@@ -20,7 +20,7 @@ public:
 	{
 		T Data;
 		ChunkNODE* pMyChunkNode;
-		//LONG64 DataConfig;
+		LONG64 DataConfig;
 	};
 
 	// 목표 청크 크기(256KB)에 맞춰 sizeof(T) 기반으로 청크 원소 수를 컴파일 타임 산출
@@ -44,10 +44,10 @@ public:
 		explicit ChunkNODE()
 		{
 			//FreeList안에서 최초할당시에만 생성자 호출됨
-			Initailize();
+			Initialize();
 		}
 	public:
-		void Initailize()
+		void Initialize()
 		{
 			//청크 클래스 구분
 			this->Config = InterlockedIncrement64(&g_Config);	// [결함 E] 원자적 증가
@@ -55,12 +55,15 @@ public:
 			for (int i = 0; i < CHUNK_SIZE; ++i)
 			{
 				this->DataArr[i].pMyChunkNode = this;
-				//this->DataArr[i].DataConfig = this->Config;
+				this->DataArr[i].DataConfig = this->Config;
 			}
 		}
 
 	public:
 		// FreeCount는 multi-thread 접근 → 독립 캐시 라인 분리 (false sharing 방지)
+		// NOTE: alignas(64)는 struct 내 오프셋만 보장. HeapAlloc은 16바이트 정렬까지만 지원하므로
+		//       인스턴스 절대 주소의 64바이트 정렬은 미보장. 다만 ChunkNODE 크기가 수십~수백KB이므로
+		//       인접 인스턴스의 FreeCount끼리 같은 캐시라인에 올 가능성은 물리적으로 없음.
 		alignas(64) volatile SHORT FreeCount;
 		// DataArr가 FreeCount와 AllocCount 사이에 위치하여 물리적 캐시 라인 분리
 		ChunkDATA DataArr[CHUNK_SIZE];
@@ -175,14 +178,13 @@ public:
 		return &(pChunkNode->DataArr[CHUNK_SIZE - 1].Data);
 	}
 
-	void Free(volatile T* Data)
+	bool Free(volatile T* Data)
 	{
 		// 내 메모리풀에서 나간게 맞는가?
-		//if (((ChunkDATA*)Data)->DataConfig != (((ChunkNODE*)((ChunkDATA*)Data)->pMyChunkNode)->Config))
-		//{
-		//	int* Crash = 0;
-		//	*Crash = 0;
-		//}
+		if (((ChunkDATA*)Data)->DataConfig != (((ChunkNODE*)((ChunkDATA*)Data)->pMyChunkNode)->Config))
+		{
+			return false;
+		}
 
 		ChunkNODE* pChunkNode = ((ChunkDATA*)Data)->pMyChunkNode;
 
@@ -196,29 +198,11 @@ public:
 			// 프리리스트 반환
 			this->_ChunkFreeList->Free(pChunkNode);
 		}
-	}
-
-
-public:
-	// [결함 F] ChunkAlloc 수정 (-> 연산자, FreeCount 초기값 수정, 실패 처리)
-	bool ChunkAlloc(ChunkNODE** ppChunkNode)
-	{
-		ChunkNODE* pNewChunkNode = this->_ChunkFreeList->Alloc();
-		if (pNewChunkNode == nullptr)
-			return false;
-
-		pNewChunkNode->FreeCount = CHUNK_SIZE;
-		pNewChunkNode->AllocCount = CHUNK_SIZE - 1;
-
-		TlsSetValue(this->TlsIndex, pNewChunkNode);
-
-		*ppChunkNode = pNewChunkNode;
 		return true;
 	}
 
-public:
+private:
 	CPoolFreeList<ChunkNODE>* _ChunkFreeList;
-	//CSListFreeList<ChunkNODE>* _ChunkFreeList;
 
 private:
 	int TlsIndex;
