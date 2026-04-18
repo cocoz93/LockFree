@@ -20,9 +20,9 @@ struct TEST_DATA
 	volatile LONG64 Count;
 };
 
-LockFree::CFreeList<TEST_DATA, false, true> LockFree_FreeList;
+LockFree::CInternalFreeList<TEST_DATA, false, true> LockFree_FreeList;
 LockFree::CLockFreeStack<TEST_DATA, true> LockFreeStack;
-LockFree::CLockFreeQ<TEST_DATA, false, true> LockFreeQ;	
+LockFree::CLockFreeQueue<TEST_DATA, false, true> LockFreeQ;	
 unsigned long long* g_LoopCount;				// 테스트 과정 얼마나 돌았는가
 
 HANDLE* HandleArr;
@@ -240,7 +240,7 @@ UINT WINAPI LockFree_StackProc(PVOID arg)
 	{
 		// 2. 자료구조에 push
 		for (int i = 0; i < g_DataSize; ++i)
-			LockFreeStack.push(arr[i]);
+			LockFreeStack.Push(arr[i]);
 
 		// 3. 약간대기 (다른스레드에서 뽑아가도록 유도)
 		WaitTime();
@@ -248,7 +248,7 @@ UINT WINAPI LockFree_StackProc(PVOID arg)
 		// 4. 내가 넣은만큼 pop
 		for (int i = 0; i < g_DataSize; ++i)
 		{
-			if (FALSE == LockFreeStack.pop(&arr[i]))
+			if (FALSE == LockFreeStack.Pop(&arr[i]))
 				CCrashDump::Crash();
 
 			//5. 데이터 값 확인

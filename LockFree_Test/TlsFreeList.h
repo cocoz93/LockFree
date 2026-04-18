@@ -12,7 +12,7 @@ namespace LockFree
 inline volatile LONG64 g_Config = 0;
 
 template<typename T>
-class CTlsFreeList
+class CExternalTlsFreeList
 {
 public:
 	struct ChunkNODE;
@@ -75,7 +75,7 @@ public:
 
 
 public:
-	explicit CTlsFreeList(bool IsPlacementNew = false)
+	explicit CExternalTlsFreeList(bool IsPlacementNew = false)
 	{
 		// ChunkNode의 생성 및 생성자 여부결정
 		// Config와 this(찾아갈주소)는 한번 박아놓으면 바뀔일 없으므로 PlacementNew = false (기본값)
@@ -91,7 +91,7 @@ public:
 		Init();
 	}
 
-	~CTlsFreeList()
+	~CExternalTlsFreeList()
 	{
 		if (this->TlsIndex != TLS_OUT_OF_INDEXES)
 			TlsFree(this->TlsIndex);
@@ -104,7 +104,7 @@ public:
 		if (this->_Initialized)
 			return true;
 
-		this->_ChunkFreeList = new CPoolFreeList<ChunkNODE>;
+		this->_ChunkFreeList = new CInternalFreeList<ChunkNODE>;
 		if (this->_ChunkFreeList == nullptr)
 			return false;
 
@@ -202,7 +202,7 @@ public:
 	}
 
 private:
-	CPoolFreeList<ChunkNODE>* _ChunkFreeList;
+	CInternalFreeList<ChunkNODE>* _ChunkFreeList;
 
 private:
 	int TlsIndex;
@@ -211,7 +211,13 @@ private:
 };
 
 template<typename T>
-using CTLS_LockFree_FreeList = CTlsFreeList<T>;
+using CExternalTLS_LockFree_FreeList = CExternalTlsFreeList<T>;
+
+template<typename T>
+using CTlsFreeList = CExternalTlsFreeList<T>;
+
+template<typename T>
+using CTLS_LockFree_FreeList = CExternalTlsFreeList<T>;
 
 }
 

@@ -70,7 +70,7 @@ public:
 		if (_Initialized)
 			return true;
 
-		_pFreeList = new(std::nothrow) CFreeList<NODE>;
+		_pFreeList = new(std::nothrow) CInternalFreeList<NODE>;
 		if (_pFreeList == nullptr)
 			return false;
 
@@ -124,7 +124,7 @@ public:
 		return 0;
 	}
 
-	bool push(const T& Data)
+	bool Push(const T& Data)
 	{
 		// NewNode 
 		NODE* nNode = _pFreeList->Alloc();
@@ -210,7 +210,7 @@ public:
 	}
 
 
-	bool pop(T* pOutData)
+	bool Pop(T* pOutData)
 	{
 		TopNODE bTopNode;
 		CASBackoff backoff;
@@ -259,7 +259,7 @@ public:
 	}
 
 private:
-	CFreeList<NODE>*	_pFreeList;
+	CInternalFreeList<NODE>*	_pFreeList;
 	TopNODE*			_pTopNode;
 	bool				_Initialized;
 	alignas(64) std::atomic<INT64> _UseSize;

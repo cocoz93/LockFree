@@ -11,7 +11,7 @@ namespace LockFree
 {
 
 template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
-class CLockFreeQ
+class CLockFreeQueue
 {
 	//-----------------------------------------------------
 	struct NODE
@@ -52,7 +52,7 @@ class CLockFreeQ
 
 public:
 	//최초 더미생성
-	explicit CLockFreeQ()
+	explicit CLockFreeQueue()
 	{
 		_pFreeList = nullptr;
 		_phead = nullptr;
@@ -66,17 +66,17 @@ public:
 		Init();
 	}
 
-	CLockFreeQ(const CLockFreeQ&) = delete;
-	CLockFreeQ& operator=(const CLockFreeQ&) = delete;
-	CLockFreeQ(CLockFreeQ&&) = delete;
-	CLockFreeQ& operator=(CLockFreeQ&&) = delete;
+	CLockFreeQueue(const CLockFreeQueue&) = delete;
+	CLockFreeQueue& operator=(const CLockFreeQueue&) = delete;
+	CLockFreeQueue(CLockFreeQueue&&) = delete;
+	CLockFreeQueue& operator=(CLockFreeQueue&&) = delete;
 
 	bool Init()
 	{
 		if (_Initialized)
 			return true;
 
-		_pFreeList = new(std::nothrow) CFreeList<NODE, PlacementNew>();
+		_pFreeList = new(std::nothrow) CInternalFreeList<NODE, PlacementNew>();
 		if (_pFreeList == nullptr)
 			return false;
 
@@ -126,7 +126,7 @@ public:
 		return true;
 	}
 
-	~CLockFreeQ()
+	~CLockFreeQueue()
 	{
 		if (_Initialized == false)
 			return;
@@ -179,7 +179,7 @@ public:
 	}
 
 	// 모니터링/디버깅용 대략 사이즈
-	INT64 ApproxSize(void) const
+	INT64 GetApproxSize(void) const
 	{
 		if constexpr (UseApproxSize)
 			return _UseSize.load(std::memory_order_relaxed);
@@ -368,7 +368,7 @@ public:
 		return true;
 	}
 private:
-	CFreeList<NODE, PlacementNew>* _pFreeList;
+	CInternalFreeList<NODE, PlacementNew>* _pFreeList;
 	volatile TopNODE* _phead;
 	volatile TopNODE* _ptail;
 	bool _Initialized;

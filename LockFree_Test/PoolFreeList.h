@@ -18,7 +18,7 @@ namespace LockFree
 	{
 
 		template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
-		class CPoolFreeList
+		class CInternalFreeList
 		{
 
 			struct NODE
@@ -67,7 +67,7 @@ namespace LockFree
 
 
 		public:
-			explicit CPoolFreeList()
+			explicit CInternalFreeList()
 			{
 				this->_pTopNode = nullptr;
 				hHeap = nullptr;
@@ -79,10 +79,10 @@ namespace LockFree
 				Init();
 			}
 
-			CPoolFreeList(const CPoolFreeList&) = delete;
-			CPoolFreeList& operator=(const CPoolFreeList&) = delete;
-			CPoolFreeList(CPoolFreeList&&) = delete;
-			CPoolFreeList& operator=(CPoolFreeList&&) = delete;
+			CInternalFreeList(const CInternalFreeList&) = delete;
+			CInternalFreeList& operator=(const CInternalFreeList&) = delete;
+			CInternalFreeList(CInternalFreeList&&) = delete;
+			CInternalFreeList& operator=(CInternalFreeList&&) = delete;
 
 			bool Init()
 			{
@@ -113,7 +113,7 @@ namespace LockFree
 				return true;
 			}
 
-			~CPoolFreeList()
+			~CInternalFreeList()
 			{
 				if (this->_Initialized == false)
 					return;
@@ -293,10 +293,13 @@ namespace LockFree
 	}
 
 	template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
-	using CPoolFreeList = Internal::CPoolFreeList<T, PlacementNew, UseApproxSize>;
+	using CInternalFreeList = Internal::CInternalFreeList<T, PlacementNew, UseApproxSize>;
 
 	template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
-	using CFreeList = CPoolFreeList<T, PlacementNew, UseApproxSize>;
+	using CPoolFreeList = CInternalFreeList<T, PlacementNew, UseApproxSize>;
+
+	template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
+	using CFreeList = CInternalFreeList<T, PlacementNew, UseApproxSize>;
 
 }
 
