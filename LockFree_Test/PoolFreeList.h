@@ -74,7 +74,7 @@ namespace LockFree
 				this->_Initialized = false;
 				this->_AllocCount = 0;
 				if constexpr (UseApproxSize)
-					_UseSize.store(0, std::memory_order_relaxed);
+					_FreeListSize.store(0, std::memory_order_relaxed);
 
 				Init();
 			}
@@ -167,6 +167,11 @@ namespace LockFree
 				while (true)
 				{
 					bTopNode.pNode = this->_pTopNode->pNode;
+
+					// stale 감지 시 CAS 회피
+					if (bTopNode.pNode != this->_pTopNode->pNode)
+						continue;
+
 					fNode->pNextNode = bTopNode.pNode;
 
 					NODE* pNode = (NODE*)InterlockedCompareExchangePointer
@@ -189,7 +194,7 @@ namespace LockFree
 				//_______________________________________________________________________________________
 
 				if constexpr (UseApproxSize)
-					_UseSize.fetch_add(1, std::memory_order_relaxed);
+					_FreeListSize.fetch_add(1, std::memory_order_relaxed);
 
 				return true;
 			}
@@ -261,17 +266,17 @@ namespace LockFree
 					new (&rNode->Data) T;
 
 				if constexpr (UseApproxSize)
-					_UseSize.fetch_sub(1, std::memory_order_relaxed);
+					_FreeListSize.fetch_sub(1, std::memory_order_relaxed);
 
 				return NodeToData(rNode);
 			}
 		public:
 			// 총 HeapAlloc된 노드 수 (단조 증가, cold path에서만 갱신)
 			INT64 GetAllocCount() const { return _AllocCount; }
-			INT64 GetApproxSize() const
+			INT64 GetFreeListSize() const
 			{
 				if constexpr (UseApproxSize)
-					return _UseSize.load(std::memory_order_relaxed);
+					return _FreeListSize.load(std::memory_order_relaxed);
 
 				return 0;
 			}
@@ -282,7 +287,7 @@ namespace LockFree
 			bool _Initialized;
 
 			alignas(64) volatile INT64	_AllocCount;	// HeapAlloc된 전체 노드 수
-			alignas(64) std::atomic<INT64> _UseSize;
+			alignas(64) std::atomic<INT64> _FreeListSize; // FreeList가 가지고있는 size
 		};
 
 	}
