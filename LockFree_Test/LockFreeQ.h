@@ -25,6 +25,27 @@ class CLockFreeQ
 		NODE* pNode;
 		INT64 UniqueCount;
 	};
+
+	// Intel oneTBB atomic_backoff 방식: Spin(pause 지수증가) → Yield(SwitchToThread)
+	struct CASBackoff
+	{
+		static constexpr int LOOPS_BEFORE_YIELD = 32;
+		int _count = 1;
+
+		__forceinline void Pause()
+		{
+			if (_count <= LOOPS_BEFORE_YIELD)
+			{
+				for (int i = 0; i < _count; ++i)
+					YieldProcessor();
+				_count <<= 1;
+			}
+			else
+			{
+				SwitchToThread();
+			}
+		}
+	};
 	//-----------------------------------------------------
 
 
@@ -167,17 +188,19 @@ public:
 	}
 
 
-	bool Enqueue(T Data)
+	bool Enqueue(const T& Data)
 	{
 		TopNODE bTopTailNode;						// backup TailTopNode;
 		NODE* pbTailNextNode;						// backupTailNext Node;
 		NODE* pnNode = this->_pFreeList->Alloc();	// NewNode;
+		if (nullptr == pnNode)
+			return false;
 
 		pnNode->Data = Data;
 		pnNode->pNextNode = nullptr;				// Enqueue는 pNext가 nullptr일 경우에만 
 
 		INT64 lTailUniqueCount = InterlockedIncrement64(&this->_TailUniqueCount);
-		int backoff = 1;
+		CASBackoff backoff;
 
 		// 노드가 추가되면 Enqueue성공 간주. tail밀기 실패는 상관X
 		while (true)
@@ -239,10 +262,7 @@ public:
 					break;
 				}
 
-				for (int i = 0; i < backoff; ++i)
-					YieldProcessor();
-				if (backoff < 16)
-					backoff <<= 1;
+				backoff.Pause();
 			}
 			//_______________________________________________________________________________________
 		}
@@ -261,7 +281,7 @@ public:
 		TopNODE	 bTopHeadNode;
 		TopNODE	 bTopTailNode;
 		NODE* bHeadNextNode;
-		int backoff = 1;
+		CASBackoff backoff;
 
 		while (true)
 		{
@@ -329,10 +349,7 @@ public:
 			))
 			{
 				// DCAS 실패
-				for (int i = 0; i < backoff; ++i)
-					YieldProcessor();
-				if (backoff < 16)
-					backoff <<= 1;
+				backoff.Pause();
 				continue;
 			}
 			else
