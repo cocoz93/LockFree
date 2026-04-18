@@ -51,13 +51,13 @@ class CLockFreeStack
 public:
 	explicit CLockFreeStack(void)
 	{
-		this->_pFreeList = new CFreeList<NODE>;
-		this->_pTopNode = (TopNODE*)_aligned_malloc(64, 64);
-		this->_pTopNode->pNode = nullptr;
-		this->_pTopNode->UniqueCount = 0;
+		_pFreeList = nullptr;
+		_pTopNode = nullptr;
+		_Initialized = false;
 		if constexpr (UseApproxSize)
 			_UseSize.store(0, std::memory_order_relaxed);
 
+		Init();
 	}
 
 	CLockFreeStack(const CLockFreeStack&) = delete;
@@ -65,8 +65,35 @@ public:
 	CLockFreeStack(CLockFreeStack&&) = delete;
 	CLockFreeStack& operator=(CLockFreeStack&&) = delete;
 
+	bool Init()
+	{
+		if (_Initialized)
+			return true;
+
+		_pFreeList = new(std::nothrow) CFreeList<NODE>;
+		if (_pFreeList == nullptr)
+			return false;
+
+		_pTopNode = (TopNODE*)_aligned_malloc(64, 64);
+		if (_pTopNode == nullptr)
+		{
+			delete _pFreeList;
+			_pFreeList = nullptr;
+			return false;
+		}
+
+		_pTopNode->pNode = nullptr;
+		_pTopNode->UniqueCount = 0;
+
+		_Initialized = true;
+		return true;
+	}
+
 	~CLockFreeStack(void)
 	{
+		if (_Initialized == false)
+			return;
+
 		NODE* pfNode;
 
 		while (this->_pTopNode->pNode != nullptr)
@@ -97,10 +124,12 @@ public:
 		return 0;
 	}
 
-	bool push(T Data)
+	bool push(const T& Data)
 	{
 		// NewNode 
 		NODE* nNode = _pFreeList->Alloc();
+		if (nullptr == nNode)
+			return false;
 
 		// Data backup
 		nNode->Data = Data;
@@ -232,6 +261,7 @@ public:
 private:
 	CFreeList<NODE>*	_pFreeList;
 	TopNODE*			_pTopNode;
+	bool				_Initialized;
 	alignas(64) std::atomic<INT64> _UseSize;
 };
 }
