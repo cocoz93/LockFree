@@ -1,9 +1,9 @@
 ﻿#pragma once
 
-#ifndef ____TLS_FREE_LIST_H____
-#define ____TLS_FREE_LIST_H____
+#ifndef ____EXTERNAL_TLS_FREE_LIST_H____
+#define ____EXTERNAL_TLS_FREE_LIST_H____
 
-#include "PoolFreeList.h"
+#include "InternalFreeList.h"
 //#include "SListFreeList.h"
 
 namespace LockFree
@@ -221,7 +221,7 @@ using CTLS_LockFree_FreeList = CExternalTlsFreeList<T>;
 
 }
 
-#endif //____TLS_FREE_LIST_H____
+#endif //____EXTERNAL_TLS_FREE_LIST_H____
 
 
 

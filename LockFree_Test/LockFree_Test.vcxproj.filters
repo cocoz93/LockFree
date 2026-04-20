@@ -29,13 +29,13 @@
     <ClInclude Include="CrashDump.h">
       <Filter>소스 파일</Filter>
     </ClInclude>
-    <ClInclude Include="PoolFreeList.h">
+    <ClInclude Include="InternalFreeList.h">
       <Filter>소스 파일\LockFree::</Filter>
     </ClInclude>
     <ClInclude Include="LockFreeQ.h">
       <Filter>소스 파일\LockFree::</Filter>
     </ClInclude>
-    <ClInclude Include="TlsFreeList.h">
+    <ClInclude Include="ExternalTlsFreeList.h">
       <Filter>소스 파일\LockFree::</Filter>
     </ClInclude>
     <ClInclude Include="LockFreeStack.h">

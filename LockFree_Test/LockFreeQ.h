@@ -5,7 +5,7 @@
 #define ____LOCKFREE_QUEUE_H____
 
 #include <atomic>
-#include "PoolFreeList.h"
+#include "InternalFreeList.h"
 
 namespace LockFree
 {

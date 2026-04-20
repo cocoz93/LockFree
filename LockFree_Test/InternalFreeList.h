@@ -1,8 +1,8 @@
 ﻿#pragma once
 
 
-#ifndef ____POOL_FREE_LIST_H____
-#define ____POOL_FREE_LIST_H____
+#ifndef ____INTERNAL_FREE_LIST_H____
+#define ____INTERNAL_FREE_LIST_H____
 
 
 #include <windows.h>
@@ -14,9 +14,6 @@
 
 namespace LockFree
 {
-	namespace Internal
-	{
-
 		template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
 		class CInternalFreeList
 		{
@@ -290,11 +287,6 @@ namespace LockFree
 			alignas(64) std::atomic<INT64> _FreeListSize; // FreeList가 가지고있는 size
 		};
 
-	}
-
-	template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
-	using CInternalFreeList = Internal::CInternalFreeList<T, PlacementNew, UseApproxSize>;
-
 	template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
 	using CPoolFreeList = CInternalFreeList<T, PlacementNew, UseApproxSize>;
 
@@ -303,4 +295,4 @@ namespace LockFree
 
 }
 
-#endif //____POOL_FREE_LIST_H____
+#endif //____INTERNAL_FREE_LIST_H____

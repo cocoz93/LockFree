@@ -138,8 +138,8 @@
     <ClInclude Include="CrashDump.h" />
     <ClInclude Include="LockFreeQ.h" />
     <ClInclude Include="LockFreeStack.h" />
-    <ClInclude Include="PoolFreeList.h" />
-    <ClInclude Include="TlsFreeList.h" />
+    <ClInclude Include="InternalFreeList.h" />
+    <ClInclude Include="ExternalTlsFreeList.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
