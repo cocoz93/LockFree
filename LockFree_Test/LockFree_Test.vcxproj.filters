@@ -32,7 +32,7 @@
     <ClInclude Include="InternalFreeList.h">
       <Filter>소스 파일\LockFree::</Filter>
     </ClInclude>
-    <ClInclude Include="LockFreeQ.h">
+    <ClInclude Include="LockFreeQueue.h">
       <Filter>소스 파일\LockFree::</Filter>
     </ClInclude>
     <ClInclude Include="ExternalTlsFreeList.h">

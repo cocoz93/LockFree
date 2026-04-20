@@ -136,7 +136,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CrashDump.h" />
-    <ClInclude Include="LockFreeQ.h" />
+    <ClInclude Include="LockFreeQueue.h" />
     <ClInclude Include="LockFreeStack.h" />
     <ClInclude Include="InternalFreeList.h" />
     <ClInclude Include="ExternalTlsFreeList.h" />
