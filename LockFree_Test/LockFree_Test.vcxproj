@@ -131,7 +131,6 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="CrashDump.cpp" />
     <ClCompile Include="TestCode.cpp" />
   </ItemGroup>
   <ItemGroup>
