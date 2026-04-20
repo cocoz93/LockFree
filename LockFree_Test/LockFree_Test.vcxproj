@@ -134,11 +134,11 @@
     <ClCompile Include="TestCode.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="CrashDump.h" />
-    <ClInclude Include="LockFreeQueue.h" />
-    <ClInclude Include="LockFreeStack.h" />
-    <ClInclude Include="InternalFreeList.h" />
-    <ClInclude Include="ExternalTlsFreeList.h" />
+    <ClInclude Include="Crash\CrashDump.h" />
+    <ClInclude Include="LockFree\LockFreeQueue.h" />
+    <ClInclude Include="LockFree\LockFreeStack.h" />
+    <ClInclude Include="LockFree\InternalFreeList.h" />
+    <ClInclude Include="LockFree\ExternalTlsFreeList.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

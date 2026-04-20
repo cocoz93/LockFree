@@ -23,19 +23,19 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="CrashDump.h">
+    <ClInclude Include="Crash\CrashDump.h">
       <Filter>소스 파일</Filter>
     </ClInclude>
-    <ClInclude Include="InternalFreeList.h">
+    <ClInclude Include="LockFree\InternalFreeList.h">
       <Filter>소스 파일\LockFree::</Filter>
     </ClInclude>
-    <ClInclude Include="LockFreeQueue.h">
+    <ClInclude Include="LockFree\LockFreeQueue.h">
       <Filter>소스 파일\LockFree::</Filter>
     </ClInclude>
-    <ClInclude Include="ExternalTlsFreeList.h">
+    <ClInclude Include="LockFree\ExternalTlsFreeList.h">
       <Filter>소스 파일\LockFree::</Filter>
     </ClInclude>
-    <ClInclude Include="LockFreeStack.h">
+    <ClInclude Include="LockFree\LockFreeStack.h">
       <Filter>소스 파일\LockFree::</Filter>
     </ClInclude>
   </ItemGroup>

@@ -12,9 +12,9 @@
 #include <set>
 #include <unordered_set>
 
-#include "InternalFreeList.h"
-#include "LockFreeStack.h"
-#include "LockFreeQueue.h"
+#include "LockFree/InternalFreeList.h"
+#include "LockFree/LockFreeStack.h"
+#include "LockFree/LockFreeQueue.h"
 
 //=============================================================================
 // 테스트 설정 상수 (반복 횟수 조절 가능)
