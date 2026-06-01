@@ -10,20 +10,22 @@
 #include <atomic>
 #include <intrin.h>
 
-#define IDENT_VAL 0x6659
-
 namespace LockFree
 {
-		template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
+		template<typename T, bool PlacementNew = false, bool UseApproxSize = false, bool ValidateOwner = false>
 		class CInternalFreeList
 		{
 
 			struct NODE
 			{
 				NODE* pNextNode;
+				LONG64	OwnerId;	// 소속 free-list 식별자 = (LONG64)this. ValidateOwner=true일 때만 사용
 				T		Data;
 			};
 
+			// 사용자가 돌려준 Data 포인터로, 그것이 들어있던 NODE의 시작주소를 되찾는다.
+			// Data는 NODE 안 고정 위치에 있으므로 그 거리(offsetof)만큼 앞으로 빼면 NODE 시작점.
+			// 참고: offsetof는 비-standard-layout T에서 표준상 회색지대지만 MSVC x64에선 항상 정확.
 			__forceinline static NODE* DataToNode(T* data)
 			{
 				return reinterpret_cast<NODE*>(
@@ -110,6 +112,7 @@ namespace LockFree
 				return true;
 			}
 
+			// 아직 Free되지 않은(사용 중) 노드는 free list에 없으므로 회수되지 않고 누수된다.
 			~CInternalFreeList()
 			{
 				if (this->_Initialized == false)
@@ -125,8 +128,7 @@ namespace LockFree
 					if constexpr (!PlacementNew)
 						pfNode->Data.~T();
 
-					//delete pfNode;
-					HeapFree(hHeap, 0, pfNode);	// HeapFree
+					HeapFree(hHeap, 0, pfNode);
 				}
 
 				_aligned_free((void*)this->_pTopNode);
@@ -145,9 +147,13 @@ namespace LockFree
 				// Free Node
 				NODE* fNode = DataToNode(Data);
 
-				// 잘못된 주소가 전달된 경우
-				//if (fNode->IsMine != IDENT_VAL)
-					//return false;
+				// 이 풀에서 나간 노드가 맞는지 검증 (cross-pool / 와일드 포인터 차단)
+				// NOTE: double-free는 잡지 못함 — OwnerId는 노드 수명 내내 불변
+				if constexpr (ValidateOwner)
+				{
+					if (fNode->OwnerId != reinterpret_cast<LONG64>(this))
+						return false;
+				}
 
 				// 소멸자 호출 (free list 반환 전에 호출해야 use-after-free 방지)
 				if constexpr (PlacementNew)
@@ -164,11 +170,6 @@ namespace LockFree
 				while (true)
 				{
 					bTopNode.pNode = this->_pTopNode->pNode;
-
-					// stale 감지 시 CAS 회피
-					if (bTopNode.pNode != this->_pTopNode->pNode)
-						continue;
-
 					fNode->pNextNode = bTopNode.pNode;
 
 					NODE* pNode = (NODE*)InterlockedCompareExchangePointer
@@ -209,6 +210,8 @@ namespace LockFree
 
 				new(&rNode->Data) T;
 				rNode->pNextNode = nullptr;
+				if constexpr (ValidateOwner)
+					rNode->OwnerId = reinterpret_cast<LONG64>(this);
 				InterlockedIncrement64(&this->_AllocCount);
 				return NodeToData(rNode);
 			}
@@ -268,6 +271,10 @@ namespace LockFree
 				return NodeToData(rNode);
 			}
 		public:
+			// 생성자가 삼킨 Init() 실패를 호출자가 확인하는 용도.
+			// false면 Alloc()은 nullptr, Free()는 false를 반환한다.
+			bool IsInitialized() const { return _Initialized; }
+
 			// 총 HeapAlloc된 노드 수 (단조 증가, cold path에서만 갱신)
 			INT64 GetAllocCount() const { return _AllocCount; }
 			INT64 GetFreeListSize() const
@@ -287,11 +294,11 @@ namespace LockFree
 			alignas(64) std::atomic<INT64> _FreeListSize; // FreeList가 가지고있는 size
 		};
 
-	template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
-	using CPoolFreeList = CInternalFreeList<T, PlacementNew, UseApproxSize>;
+	template<typename T, bool PlacementNew = false, bool UseApproxSize = false, bool ValidateOwner = false>
+	using CPoolFreeList = CInternalFreeList<T, PlacementNew, UseApproxSize, ValidateOwner>;
 
-	template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
-	using CFreeList = CInternalFreeList<T, PlacementNew, UseApproxSize>;
+	template<typename T, bool PlacementNew = false, bool UseApproxSize = false, bool ValidateOwner = false>
+	using CFreeList = CInternalFreeList<T, PlacementNew, UseApproxSize, ValidateOwner>;
 
 }
 
