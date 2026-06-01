@@ -9,17 +9,20 @@
 #include <new>
 #include <atomic>
 #include <intrin.h>
+#include <cassert>
 
 namespace LockFree
 {
-		template<typename T, bool PlacementNew = false, bool UseApproxSize = false, bool ValidateOwner = false>
+		template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
 		class CInternalFreeList
 		{
 
 			struct NODE
 			{
 				NODE* pNextNode;
-				LONG64	OwnerId;	// 소속 free-list 식별자 = (LONG64)this. ValidateOwner=true일 때만 사용
+#ifndef NDEBUG
+				LONG64	OwnerId;	// 디버그 빌드에서만 존재. Free 시 소속 풀(this) 소유권 assert용
+#endif
 				T		Data;
 			};
 
@@ -147,13 +150,9 @@ namespace LockFree
 				// Free Node
 				NODE* fNode = DataToNode(Data);
 
-				// 이 풀에서 나간 노드가 맞는지 검증 (cross-pool / 와일드 포인터 차단)
-				// NOTE: double-free는 잡지 못함 — OwnerId는 노드 수명 내내 불변
-				if constexpr (ValidateOwner)
-				{
-					if (fNode->OwnerId != reinterpret_cast<LONG64>(this))
-						return false;
-				}
+				// 릴리즈는 fail-fast(이 풀의 유효 포인터 전제, delete와 동일).
+				// 디버그에서만 크로스풀 오용을 assert로 탐지 (와일드 포인터/double-free는 못 잡음).
+				assert(fNode->OwnerId == reinterpret_cast<LONG64>(this) && "다른 풀에서 나온 포인터를 Free함");
 
 				// 소멸자 호출 (free list 반환 전에 호출해야 use-after-free 방지)
 				if constexpr (PlacementNew)
@@ -210,8 +209,9 @@ namespace LockFree
 
 				new(&rNode->Data) T;
 				rNode->pNextNode = nullptr;
-				if constexpr (ValidateOwner)
-					rNode->OwnerId = reinterpret_cast<LONG64>(this);
+#ifndef NDEBUG
+				rNode->OwnerId = reinterpret_cast<LONG64>(this);
+#endif
 				InterlockedIncrement64(&this->_AllocCount);
 				return NodeToData(rNode);
 			}
@@ -293,12 +293,6 @@ namespace LockFree
 			alignas(64) volatile INT64	_AllocCount;	// HeapAlloc된 전체 노드 수
 			alignas(64) std::atomic<INT64> _FreeListSize; // FreeList가 가지고있는 size
 		};
-
-	template<typename T, bool PlacementNew = false, bool UseApproxSize = false, bool ValidateOwner = false>
-	using CPoolFreeList = CInternalFreeList<T, PlacementNew, UseApproxSize, ValidateOwner>;
-
-	template<typename T, bool PlacementNew = false, bool UseApproxSize = false, bool ValidateOwner = false>
-	using CFreeList = CInternalFreeList<T, PlacementNew, UseApproxSize, ValidateOwner>;
 
 }
 
