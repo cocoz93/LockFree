@@ -7,6 +7,16 @@
 #include <atomic>
 #include "InternalFreeList.h"
 
+// 경합 창 증폭 지점 (검증 훅)
+// 평소 빌드에서는 빈 매크로라 코드에서 완전히 사라진다(비용 0).
+// 테스트 빌드가 이 매크로를 "확률적 지연"으로 재정의하면 스냅샷 읽기 사이의
+// 나노초 틈이 마이크로초로 벌어져, OS 선점으로만 드물게 터지던 경합이
+// 수천 배 빨리 재현된다. 락프리는 어느 지점에서 얼마나 멈춰도 옳아야 하므로
+// 지연을 넣어 깨진다면 원래 있던 결함이다. (TestCode.cpp의 USE_RACE_HOOK 참고)
+#ifndef LF_RACE_HOOK
+#define LF_RACE_HOOK()
+#endif
+
 namespace LockFree
 {
 
@@ -300,7 +310,11 @@ public:
 
 			_mm_prefetch((const char*)bTopHeadNode.pNode, _MM_HINT_T0);
 
+			LF_RACE_HOOK();		// [증폭 A] head 스냅샷 ~ next 읽기 사이 창 (D2 재검증이 지키는 구간)
+
 			bHeadNextNode = bTopHeadNode.pNode->pNextNode;
+
+			LF_RACE_HOOK();		// [증폭 B] next 읽기 ~ tail 접근/CAS 사이 창 (D1 재검증이 지키는 구간)
 
 			// 큐가 비어있으면 tail 읽기 없이 즉시 반환 (호출자 책임)
 			if (bHeadNextNode == nullptr)

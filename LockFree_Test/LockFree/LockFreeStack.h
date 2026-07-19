@@ -8,6 +8,11 @@
 #include <atomic>
 #include "InternalFreeList.h"
 
+// 경합 창 증폭 지점 (검증 훅) — 상세 설명은 LockFreeQueue.h 동일 블록 참고
+#ifndef LF_RACE_HOOK
+#define LF_RACE_HOOK()
+#endif
+
 namespace LockFree
 {
 
@@ -229,6 +234,8 @@ public:
 			//CAS를 덜 호출하기위해, 이미 자료구조가 바뀌었다면 다시시도.
 			if (bTopNode.UniqueCount != this->_pTopNode->UniqueCount)
 				continue;
+
+			LF_RACE_HOOK();		// [증폭] 태그 재확인 ~ DCAS 사이 창 (UniqueCount 태그가 지키는 구간)
 
 			if (false == InterlockedCompareExchange128
 			(

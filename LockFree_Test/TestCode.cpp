@@ -12,6 +12,32 @@
 #include <set>
 #include <unordered_set>
 
+//=============================================================================
+// 경합 창 증폭 훅 (USE_RACE_HOOK 빌드 전용)
+// 자료구조 헤더의 LF_RACE_HOOK()를 "1/8 확률 ~1µs 헛돌기"로 재정의한다.
+// 스냅샷 읽기 사이의 나노초 틈이 마이크로초로 벌어져, OS 선점으로만 드물게
+// 터지던 낡은-스냅샷 경합이 수 초 안에 재현된다. (일반 빌드에선 흔적 없음)
+//   빌드 예: cl /O2 /DNDEBUG /DUSE_RACE_HOOK /std:c++17 /EHsc TestCode.cpp
+//=============================================================================
+#ifdef USE_RACE_HOOK
+#include <windows.h>
+static thread_local unsigned t_raceRng = 0;
+static void RaceStall()
+{
+    // xorshift 난수로 스레드마다 스톨 타이밍을 다르게 섞는다 (전부 같이 멈추면 경합이 안 생김)
+    unsigned x = t_raceRng;
+    if (x == 0) x = GetCurrentThreadId() * 2654435761u + 97u;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    t_raceRng = x;
+    if ((x & 7u) == 0u)                        // 1/8 확률로만 스톨
+    {
+        volatile int v = 0;
+        for (int i = 0; i < 4000; ++i) v++;    // ~1µs급: 다른 스레드가 여러 op를 끝낼 시간
+    }
+}
+#define LF_RACE_HOOK() RaceStall()
+#endif
+
 #include "LockFree/InternalFreeList.h"
 #include "LockFree/LockFreeStack.h"
 #include "LockFree/LockFreeQueue.h"
@@ -35,6 +61,11 @@ namespace TestConfig
     const uint64_t STACK_SINGLE_ITERATIONS = 500'000;                // 50만 번
     const uint64_t QUEUE_SINGLE_ITERATIONS = 500'000;                // 50만 번
     const uint64_t NUMBERS_PER_THREAD = 10'000'000;                  // Producer-Consumer 각 스레드당
+
+    // Phase 2-3: 보존 불변식 (Conservation) 테스트
+    const int64_t CONSERVATION_PREFILL = 50'000;        // 미리 채우는 개수 (스레드 수보다 훨씬 크게)
+    const int     CONSERVATION_SECONDS = 15;            // 스레드 조합당 실행 시간
+    const int     CONSERVATION_HANG_SECONDS = 10;       // 이 시간 동안 진행 0이면 HANG 판정
 
     // 진행 상황 출력 주기
     const uint64_t PROGRESS_INTERVAL = 100'000;
@@ -1698,10 +1729,20 @@ void RunQueueProducerConsumerTest(
     {
         consumers.emplace_back([&, consumerId]()
             {
+                uint64_t spinCount = 0;
                 while (true)
                 {
                     if (allProducersDone && totalDequeued >= (uint64_t)TOTAL_NUMBERS)
                         break;
+
+                    // 노드 유실/큐 오염 시 영원히 대기하는 대신 명시적 FAIL (4096회마다 시계 확인)
+                    if ((++spinCount & 0xFFF) == 0 &&
+                        std::chrono::steady_clock::now() - startTime > std::chrono::minutes(5))
+                    {
+                        std::cout << "\n[CRASH] Consumer 타임아웃(5분): Dequeue 진행 불가 (dequeued="
+                            << totalDequeued << " / " << TOTAL_NUMBERS << ")" << std::endl;
+                        Crash();
+                    }
 
                     int value;
                     if (queue.Dequeue(&value))
@@ -1961,6 +2002,170 @@ void Queue_Test_HighContention()
 
 
 //=============================================================================
+//=============================================================================
+//
+//  보존 불변식 (Conservation) 테스트 — Stack / Queue 공용
+//
+//=============================================================================
+//=============================================================================
+//
+// 원리:
+//   1) 자료구조에 PREFILL개(sequence 1..N)를 미리 채운다.
+//   2) T개 스레드가 "꺼내기 성공 → 즉시 같은 값 되넣기"만 반복한다.
+//      → 각 스레드가 손에 든 값은 최대 1개. 내부에는 항상 PREFILL−T개 이상
+//        남으므로 논리적으로 절대 비지 않는다.
+//   3) 따라서 꺼내기가 false를 1번이라도 반환하면 그 자체로 "허위 empty" 결함 입증.
+//      (Producer-Consumer 테스트는 큐가 진짜 빌 수 있어 false를 의심할 수 없음)
+//   4) 진행 카운터가 CONSERVATION_HANG_SECONDS 동안 멈추면 HANG 판정 → 명시적 FAIL.
+//   5) 종료 후 전량 회수해 개수·sequence 합계를 대조 → 유실/중복/파손 검출.
+//
+// USE_RACE_HOOK 빌드와 조합하면 낡은-스냅샷 경합류 회귀를 수 초 안에 잡는다.
+//=============================================================================
+template <typename TryTakeFn, typename PutBackFn>
+void RunConservationTest(const char* name, int threadCount,
+    TryTakeFn tryTake, PutBackFn putBack)
+{
+    const int64_t PREFILL = TestConfig::CONSERVATION_PREFILL;
+    const int64_t EXPECT_SUM = PREFILL * (PREFILL + 1) / 2;
+
+    std::cout << "\n[" << name << " 보존 불변식] 스레드 " << threadCount
+        << "개, " << TestConfig::CONSERVATION_SECONDS << "초 (불변식: 내부 잔량 >= "
+        << PREFILL - threadCount << " > 0)" << std::endl;
+
+    // 1) 프리필 (sequence 1..PREFILL)
+    for (int64_t i = 1; i <= PREFILL; i++)
+    {
+        TestPayload p;
+        p.Init(0, (uint32_t)i);
+        TEST_ASSERT(putBack(p), "Conservation 프리필 실패");
+    }
+
+    std::atomic<uint64_t> ops(0);
+    std::atomic<uint64_t> falseEmpty(0);
+    std::atomic<bool> stop(false);
+
+    // 2) 꺼내면 즉시 되넣기 (꺼낸 뒤에는 stop 여부와 무관하게 반드시 되넣어 보존 유지)
+    std::vector<std::thread> threads;
+    for (int t = 0; t < threadCount; t++)
+    {
+        threads.emplace_back([&]() {
+            TestPayload p;
+            while (!stop.load(std::memory_order_relaxed))
+            {
+                if (tryTake(&p))
+                {
+                    TEST_ASSERT(p.Verify(), "Conservation 페이로드 손상");
+                    TEST_ASSERT(putBack(p), "Conservation 되넣기 실패");
+                }
+                else
+                {
+                    // 불변식상 불가능 — 1회라도 나오면 허위 empty 결함
+                    falseEmpty.fetch_add(1, std::memory_order_relaxed);
+                }
+                ops.fetch_add(1, std::memory_order_relaxed);
+            }
+            });
+    }
+
+    // 3) 워치독: 진행 카운터가 일정 시간 멈추면 HANG 판정 (조용한 멈춤 → 명시적 FAIL)
+    auto startTime = std::chrono::steady_clock::now();
+    uint64_t lastOps = 0;
+    int stallTicks = 0;
+    const int HANG_TICKS = TestConfig::CONSERVATION_HANG_SECONDS * 2;   // 500ms 단위
+
+    while (std::chrono::steady_clock::now() - startTime
+        < std::chrono::seconds(TestConfig::CONSERVATION_SECONDS))
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+        uint64_t cur = ops.load();
+        if (cur == lastOps)
+        {
+            if (++stallTicks >= HANG_TICKS)
+            {
+                std::cout << "\n[CRASH] " << name << " Conservation HANG: "
+                    << TestConfig::CONSERVATION_HANG_SECONDS << "초간 진행 없음 (ops="
+                    << cur << ", falseEmpty=" << falseEmpty.load() << ")" << std::endl;
+                Crash();
+            }
+        }
+        else
+            stallTicks = 0;
+        lastOps = cur;
+    }
+
+    stop = true;
+    for (auto& t : threads) t.join();
+
+    // 4) 전량 회수 → 보존 검증 (개수·합계 대조. 진단을 위해 판정 전에 수치 출력)
+    TestPayload p;
+    int64_t cnt = 0;
+    int64_t sum = 0;
+    while (tryTake(&p))
+    {
+        TEST_ASSERT(p.Verify(), "Conservation 회수 페이로드 손상");
+        cnt++;
+        sum += p.sequence;
+        TEST_ASSERT(cnt <= PREFILL, "Conservation 회수 개수 초과 (노드 중복/순환 의심)");
+    }
+
+    uint64_t fe = falseEmpty.load();
+    std::cout << "  > 총 op: " << ops.load()
+        << ", 허위 empty: " << fe
+        << ", 회수: " << cnt << "/" << PREFILL
+        << ", 합계: " << sum << "/" << EXPECT_SUM << std::endl;
+
+    TEST_ASSERT(fe == 0, "허위 empty " + std::to_string(fe) + "회: 비어있지 않은데 false 반환");
+    TEST_ASSERT(cnt == PREFILL, "회수 개수 불일치 (노드 유실)");
+    TEST_ASSERT(sum == EXPECT_SUM, "회수 합계 불일치 (중복/파손)");
+
+    g_testCount++;
+}
+
+void Stack_Test_Conservation()
+{
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "[Stack 2-3] 보존 불변식 테스트" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    // 40스레드 = 물리 코어 대비 과구독 → 연산 한복판 선점을 강제해 경합 창을 연다
+    for (int threadCount : { 8, 40 })
+    {
+        LockFree::CLockFreeStack<TestPayload, true> stack;
+        RunConservationTest("Stack", threadCount,
+            [&](TestPayload* p) { return stack.Pop(p); },
+            [&](const TestPayload& v) { return stack.Push(v); });
+
+        TEST_ASSERT(stack.IsEmpty(), "회수 후 스택이 비어있지 않음");
+        TEST_ASSERT(stack.GetApproxSize() == 0, "회수 후 ApproxSize != 0");
+    }
+
+    std::cout << "\n[PASS] Stack 보존 불변식 테스트 완료!" << std::endl;
+}
+
+void Queue_Test_Conservation()
+{
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "[Queue 2-3] 보존 불변식 테스트" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    // 40스레드 = 물리 코어 대비 과구독 → 연산 한복판 선점을 강제해 경합 창을 연다
+    for (int threadCount : { 8, 40 })
+    {
+        LockFree::CLockFreeQueue<TestPayload, false, true> queue;
+        RunConservationTest("Queue", threadCount,
+            [&](TestPayload* p) { return queue.Dequeue(p); },
+            [&](const TestPayload& v) { return queue.Enqueue(v); });
+
+        TEST_ASSERT(queue.IsEmpty(), "회수 후 큐가 비어있지 않음");
+        TEST_ASSERT(queue.GetApproxSize() == 0, "회수 후 ApproxSize != 0");
+    }
+
+    std::cout << "\n[PASS] Queue 보존 불변식 테스트 완료!" << std::endl;
+}
+
+
+//=============================================================================
 // 메뉴 출력
 //=============================================================================
 void PrintMenu()
@@ -1972,6 +2177,7 @@ void PrintMenu()
     std::cout << "  2. LockFreeStack 전체 테스트" << std::endl;
     std::cout << "  3. LockFreeQueue 전체 테스트" << std::endl;
     std::cout << "  4. 전체 통합 테스트 (FreeList + Stack + Queue)" << std::endl;
+    std::cout << "  5. 보존 불변식 빠른 검증 (Stack + Queue, 약 1분)" << std::endl;
     std::cout << "  0. 종료" << std::endl;
     std::cout << "========================================" << std::endl;
     std::cout << "선택: ";
@@ -2023,6 +2229,7 @@ int main()
                 Stack_Test_Defense();
                 Stack_Test_MT_PushPop();
                 Stack_Test_HighContention();
+                Stack_Test_Conservation();
                 break;
 
             case 3:
@@ -2031,6 +2238,7 @@ int main()
                 Queue_Test_Defense();
                 Queue_Test_ProducerConsumer();
                 Queue_Test_HighContention();
+                Queue_Test_Conservation();
                 break;
 
             case 4:
@@ -2045,10 +2253,18 @@ int main()
                 Stack_Test_Defense();
                 Stack_Test_MT_PushPop();
                 Stack_Test_HighContention();
+                Stack_Test_Conservation();
                 Queue_Test_FIFOIntegrity();
                 Queue_Test_Defense();
                 Queue_Test_ProducerConsumer();
                 Queue_Test_HighContention();
+                Queue_Test_Conservation();
+                break;
+
+            case 5:
+                std::cout << "\n[보존 불변식 빠른 검증]" << std::endl;
+                Stack_Test_Conservation();
+                Queue_Test_Conservation();
                 break;
 
             default:
