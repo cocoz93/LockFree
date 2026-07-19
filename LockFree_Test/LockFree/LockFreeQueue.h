@@ -304,7 +304,13 @@ public:
 
 			// 큐가 비어있으면 tail 읽기 없이 즉시 반환 (호출자 책임)
 			if (bHeadNextNode == nullptr)
+			{
+				// [D2 수정] next==null 읽은 뒤에도 head 스냅샷이 낡았을 수 있음(재활용된 head면
+				//           데이터 있는데 empty 오판). head 태그 재확인 후에만 empty 확정.
+				if (bTopHeadNode.UniqueCount != this->_phead->UniqueCount)
+					continue;
 				return false;
+			}
 
 			//_______________________________________________________________________________________
 			// 
@@ -314,6 +320,11 @@ public:
 			// tail백업
 			bTopTailNode.UniqueCount = this->_ptail->UniqueCount;
 			bTopTailNode.pNode = this->_ptail->pNode;
+
+			// [D1 수정] tail 읽은 뒤 head 스냅샷 재검증. 낡은 head가 재활용돼 tail 자리로
+			//           돌아오면 낡은 next를 tail에 심어 큐 오염(전역 HANG). (MS 원본 D6 단계)
+			if (bTopHeadNode.UniqueCount != this->_phead->UniqueCount)
+				continue;
 
 			// head==tail: Enqueue 직후 tail이 안 밀린 상태 — tail push 후 재시도 (댕글링 방지)
 			if (bTopHeadNode.pNode == bTopTailNode.pNode)
