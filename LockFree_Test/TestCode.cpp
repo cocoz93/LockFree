@@ -2354,6 +2354,108 @@ void Queue_Test_PerProducerFIFO()
 
 
 //=============================================================================
+// FreeList 직접 스트레스 (headless, 시간예산)  [프리리스트 불변식 반증]
+//
+// 불변식:
+//   ① 내가 Alloc해 쥔 노드는 Free 전까지 절대 남에게 재배부되지 않는다
+//      → 쥐고 있는 동안 내 서명(threadId, sequence)이 유지돼야 함.
+//        깨지면 "같은 노드 이중 배부"(Alloc ABA) 또는 corruption.
+//   ② 보존: 총 Alloc == 총 Free, 종료 후 AllocCount == FreeListSize (유실 없음).
+//
+// Alloc/Free 증폭 훅과 조합하면 경합 창이 µs로 벌어져 희귀 ABA를 노출한다.
+//=============================================================================
+static bool RunFreeListStress(int threadCount, int durationSeconds)
+{
+    std::cout << "\n[FreeList 스트레스] 스레드 " << threadCount << ", " << durationSeconds << "초"
+#ifdef USE_RACE_HOOK
+              << "  (RACE_HOOK ON)"
+#else
+              << "  (RACE_HOOK OFF - 대조군)"
+#endif
+              << std::endl;
+
+    LockFree::CInternalFreeList<TestPayload, false, true> pool;
+
+    std::atomic<bool>     stop(false), corrupt(false);
+    std::atomic<uint64_t> allocs(0), frees(0);
+    int      cTid = -1;
+    uint32_t cExp = 0, cGot = 0;                 // corruption 기록
+
+    const int BATCH = 16;                        // 여러 노드를 동시에 쥐어 이중 배부 창을 넓힘
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < threadCount; ++t)
+    {
+        threads.emplace_back([&, t]()
+        {
+            std::vector<TestPayload*> batch(BATCH);
+            std::vector<uint32_t>     seqs(BATCH);
+            uint32_t seq = 0;
+            while (!stop.load(std::memory_order_relaxed))
+            {
+                // Alloc + 내 서명 기록
+                for (int k = 0; k < BATCH; ++k)
+                {
+                    TestPayload* p = pool.Alloc();
+                    if (p == nullptr) { corrupt = true; stop = true; return; }
+                    p->Init((uint32_t)t, seq);
+                    batch[k] = p; seqs[k] = seq; ++seq;
+                    allocs.fetch_add(1, std::memory_order_relaxed);
+                }
+                // 쥐고 있는 동안 내 서명이 유지되는지 검증 (남이 같은 노드를 배부받아 덮어썼으면 깨짐)
+                for (int k = 0; k < BATCH; ++k)
+                {
+                    if (!batch[k]->Verify()
+                        || batch[k]->threadId != (uint32_t)t
+                        || batch[k]->sequence != seqs[k])
+                    {
+                        cTid = t; cExp = (uint32_t)t; cGot = batch[k]->threadId;
+                        corrupt = true; stop = true; return;
+                    }
+                }
+                // Free
+                for (int k = 0; k < BATCH; ++k)
+                {
+                    pool.Free(batch[k]);
+                    frees.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+
+    auto start = std::chrono::steady_clock::now();
+    while (!stop.load() &&
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(durationSeconds))
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        std::cout << "  .. 경과 "
+                  << std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::steady_clock::now() - start).count()
+                  << "초, alloc=" << allocs.load() << ", free=" << frees.load() << std::endl;
+    }
+    stop = true;
+    for (auto& th : threads) th.join();
+
+    if (corrupt.load())
+    {
+        std::cout << "\n[REPRO] *** 프리리스트 불변식 위반 - 이중 배부/corruption" << std::endl;
+        std::cout << "        스레드 " << cTid << "가 쥔 노드가 덮어써짐 (내 tid=" << cExp
+                  << ", 읽힌 tid=" << cGot << ")" << std::endl;
+        return true;
+    }
+
+    // 보존 검사: alloc==free, 전량 반환
+    uint64_t a = allocs.load(), f = frees.load();
+    INT64 ac = pool.GetAllocCount(), fl = pool.GetFreeListSize();
+    bool ok = (a == f) && (ac == fl);
+    std::cout << "  > alloc=" << a << ", free=" << f
+              << ", AllocCount=" << ac << ", FreeListSize=" << fl
+              << (ok ? "  (보존 OK)" : "  ★불일치(유실/누수)!") << std::endl;
+    return !ok;
+}
+
+
+//=============================================================================
 // 메뉴 출력
 //=============================================================================
 void PrintMenu()
@@ -2405,6 +2507,15 @@ int main(int argc, char** argv)
             Queue_Test_Conservation();
             std::cout << "\n[EXIT] cons = PASS (크래시 없이 완주)" << std::endl;
             return 0;
+        }
+        if (mode == "fl")
+        {
+            // 프리리스트 직접 스트레스(이중 배부·유실). 종료코드 0=무결, 2=위반.
+            int threads = (argc >= 3) ? std::atoi(argv[2]) : 8;
+            int secs    = (argc >= 4) ? std::atoi(argv[3]) : 30;
+            bool r = RunFreeListStress(threads, secs);
+            std::cout << "\n[EXIT] fl " << (r ? "= 위반 검출(결함)" : "= 위반 미검출") << std::endl;
+            return r ? 2 : 0;
         }
         std::cout << "알 수 없는 모드: " << mode << std::endl;
         return 1;

@@ -11,6 +11,13 @@
 #include <intrin.h>
 #include <cassert>
 
+// 경합 창 증폭 훅 (검증 훅) — 상세 설명은 LockFreeQueue.h 동일 블록 참고.
+// 평소 빌드에선 빈 매크로라 비용 0. 테스트가 "확률적 지연"으로 재정의하면 Alloc/Free의
+// 경합 창이 µs로 벌어져 OS 선점으로만 드물게 터지던 재활용 경합을 수천 배 빨리 노출한다.
+#ifndef LF_RACE_HOOK
+#define LF_RACE_HOOK()
+#endif
+
 namespace LockFree
 {
 		template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
@@ -171,6 +178,9 @@ namespace LockFree
 					bTopNode.pNode = this->_pTopNode->pNode;
 					fNode->pNextNode = bTopNode.pNode;
 
+					// [증폭] top 읽기 ~ push CAS 사이 창 (Treiber push: 이 사이 top이 바뀌면 CAS 실패·재시도)
+					LF_RACE_HOOK();
+
 					NODE* pNode = (NODE*)InterlockedCompareExchangePointer
 					(
 						(volatile PVOID*)&this->_pTopNode->pNode,
@@ -239,6 +249,9 @@ namespace LockFree
 					//CAS를 덜 호출하기위함
 					if (bTopNode.UniqueCount != this->_pTopNode->UniqueCount)
 						continue;
+
+					// [증폭] 태그 재확인 ~ DCAS 사이 창 (재활용된 top의 next를 읽어 pop — UniqueCount 태그가 지키는 구간)
+					LF_RACE_HOOK();
 
 					if (false == InterlockedCompareExchange128
 					(

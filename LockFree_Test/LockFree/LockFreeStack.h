@@ -185,6 +185,9 @@ public:
 			bTopNode.pNode = this->_pTopNode->pNode;
 			nNode->pNextNode = bTopNode.pNode;
 
+			// [증폭] top 읽기 ~ push CAS 사이 창 (Treiber push: 이 사이 top이 바뀌면 CAS 실패·재시도)
+			LF_RACE_HOOK();
+
 			NODE* pNode = (NODE*)InterlockedCompareExchangePointer
 			(
 				(volatile PVOID*)&this->_pTopNode->pNode,
