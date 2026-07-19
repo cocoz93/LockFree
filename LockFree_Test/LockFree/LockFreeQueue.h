@@ -18,6 +18,13 @@
 #define LF_RACE_HOOK()
 #endif
 
+// Enqueue 전용 창 증폭 훅. Enqueue의 결함(재활용된 tail 노드에 낡은 스냅샷이 링크)은
+// tail 노드가 Free→재활용되기까지 수 µs가 걸려야 열리므로, 일반 LF_RACE_HOOK(수백 ns)보다
+// 더 길게 멈추도록 테스트가 별도로 재정의한다. 평소 빌드에선 빈 매크로라 비용 0.
+#ifndef LF_RACE_HOOK_ENQ
+#define LF_RACE_HOOK_ENQ()
+#endif
+
 namespace LockFree
 {
 
@@ -30,9 +37,24 @@ class CLockFreeQueue
 		"CLockFreeQueue<T>: T must be trivially copyable");
 
 	//-----------------------------------------------------
+	struct NODE;
+
+	// 노드의 next를 (포인터+태그) 128비트 counted pointer로 만들어 링크를 DCAS로 설치한다.
+	// 노드가 재활용될 때마다(Enqueue 재사용 초기화) Tag가 단조 증가하므로, 낡은
+	// (null, 옛태그) 스냅샷을 든 Enqueue의 링크 DCAS는 반드시 실패한다 → null-ABA(Q-E1) 차단.
+	// cmpxchg16b 요건: &NODE::Next가 16바이트 정렬이어야 함(아래 alignas(16)로 보장).
+	struct NextRef
+	{
+		NODE* pNode;   // low  64
+		INT64 Tag;     // high 64
+	};
+
 	struct NODE
 	{
-		NODE* pNextNode;
+		// Tag는 물리 노드의 재사용 전체에 걸쳐 단조 증가해야 하므로, 최초 HeapAlloc 시
+		// 1회만 {null,0}으로 초기화하고(멤버 초기자) 재사용에선 보존한다. (프리리스트를
+		// PlacementNew=false로 고정해 Alloc마다 재구성으로 리셋되는 것을 막는다 — _pFreeList 참고)
+		alignas(16) NextRef Next{ nullptr, 0 };
 		T Data;
 	};
 
@@ -90,7 +112,7 @@ public:
 		if (_Initialized)
 			return true;
 
-		_pFreeList = new(std::nothrow) CInternalFreeList<NODE, PlacementNew>();
+		_pFreeList = new(std::nothrow) CInternalFreeList<NODE, false>();
 		if (_pFreeList == nullptr)
 			return false;
 
@@ -123,7 +145,12 @@ public:
 			_pFreeList = nullptr;
 			return false;
 		}
-		pDummy->pNextNode = nullptr;
+		pDummy->Next.pNode = nullptr;			// Tag는 멤버 초기자로 0 (최초 alloc)
+
+		// cmpxchg16b는 대상이 16바이트 정렬이어야 함. 프리리스트 노드가 그 정렬을
+		// 만족하는지 1회 확인(디버그). 안 맞으면 링크 DCAS가 #GP로 크래시하므로 조기 검출.
+		assert((reinterpret_cast<UINT_PTR>(&pDummy->Next) & 15) == 0
+			&& "NODE.Next가 16바이트 정렬이 아님 (InterlockedCompareExchange128 요건)");
 
 		_phead->pNode = pDummy;
 		_phead->UniqueCount = 0;
@@ -161,10 +188,10 @@ public:
 		//모든 노드 삭제
 		NODE* pfNode = nullptr;
 
-		while (this->_phead->pNode->pNextNode != nullptr)
+		while (this->_phead->pNode->Next.pNode != nullptr)
 		{
-			pfNode = this->_phead->pNode->pNextNode;
-			this->_phead->pNode->pNextNode = this->_phead->pNode->pNextNode->pNextNode;
+			pfNode = this->_phead->pNode->Next.pNode;
+			this->_phead->pNode->Next.pNode = pfNode->Next.pNode;
 			_pFreeList->Free(pfNode);
 		}
 
@@ -185,7 +212,7 @@ public:
 		if (_Initialized == false || _phead == nullptr)
 			return true;
 
-		return (_phead->pNode->pNextNode == nullptr);
+		return (_phead->pNode->Next.pNode == nullptr);
 	}
 
 	// 모니터링/디버깅용 대략 사이즈
@@ -207,7 +234,16 @@ public:
 			return false;
 
 		pnNode->Data = Data;
-		pnNode->pNextNode = nullptr;				// Enqueue는 pNext가 nullptr일 경우에만
+		// 재사용 초기화: next=null, Tag는 이전 값 +1로 단조 증가시켜 낡은 링크 스냅샷을 무효화.
+		// (pnNode는 아직 private. Tag는 최초 alloc 시 멤버 초기자 0, 재사용마다 여기서 +1.
+		//  이 노드에 대한 stale DCAS는 Tag가 이미 앞서 있어 모두 실패하므로 이 평문 쓰기는 안전)
+		pnNode->Next.pNode = nullptr;
+		pnNode->Next.Tag  += 1;
+
+		// [증폭 C] 새 노드가 next=null인 private 상태로 머무는 창을 넓힌다.
+		// 이 노드가 직전에 Free→재활용된 tail 노드라면 낡은 스냅샷을 든 Enqueue가 노릴 수 있는
+		// 구간 — 이제 아래 재검증+counted-next가 방어하므로, 이 훅은 그 방어를 스트레스한다(Q-E1).
+		LF_RACE_HOOK_ENQ();
 
 		CASBackoff backoff;
 
@@ -224,17 +260,30 @@ public:
 
 			_mm_prefetch((const char*)bTopTailNode.pNode, _MM_HINT_T0);
 
-			//tail의 Next백업
-			pbTailNextNode = bTopTailNode.pNode->pNextNode;
+			// [증폭 D] tail 스냅샷 ~ next 읽기 창을 넓힌다. 이 사이 스냅샷 노드가 Dequeue로 Free·
+			// 재활용되는 상황을 강제해, 아래 "next 읽은 뒤 tail 재검증 + counted-next DCAS"가
+			// 재활용을 제대로 걸러내는지 스트레스한다. (수정 전 null-ABA가 터지던 바로 그 창 — Q-E1)
+			LF_RACE_HOOK_ENQ();
+
+			//tail의 Next백업 (pNode + Tag 스냅샷)
+			pbTailNextNode = bTopTailNode.pNode->Next.pNode;
+			INT64 bTailNextTag = bTopTailNode.pNode->Next.Tag;
+
+			// [Q-E1 수정 핵심] next를 읽은 뒤 tail 스냅샷 재검증 (MS 원본의 tail==Q.tail).
+			// 스냅샷 tail 노드가 그새 Dequeue·Free·재활용됐다면 tail 태그(UniqueCount)가 이미
+			// 바뀌어 여기서 걸러진다(낡은 tail 노드 감지). 이 재검증만으로는 재검증~CAS 사이
+			// 잔여 창이 남지만, 아래 링크가 counted-next DCAS라 그 창의 재활용도 next Tag로
+			// 감지된다 → 둘이 함께 null-ABA(Q-E1)를 완전히 닫는다.
+			if (bTopTailNode.UniqueCount != this->_ptail->UniqueCount)
+				continue;
 
 			//_______________________________________________________________________________________
-			// 
+			//
 			//	tail뒤에 노드가 존재하는 경우 - 밀어준다.
 			//_______________________________________________________________________________________
 			if (nullptr != pbTailNextNode)
 			{
-				// 태그 = 관측값+1 (지역). 설치는 이 라인의 CAS로 직렬화되므로 위치별로
-				// (노드,태그) 쌍이 재발하지 않음 — ABA 방지에 충분 (스택 Pop·프리리스트 Alloc과 동일 방식)
+				// tail 워드 태그 = 관측값+1. 설치가 이 CAS로 직렬화되어 (노드,태그) 쌍이 재발 안 함.
 				InterlockedCompareExchange128
 				(
 					(volatile INT64*)_ptail,
@@ -247,20 +296,24 @@ public:
 			//_______________________________________________________________________________________
 
 			//_______________________________________________________________________________________
-			// 
-			//	Enqueue시도 (CAS)
+			//
+			//	Enqueue시도: tail 노드의 next를 (null, bTailNextTag) → (pnNode, bTailNextTag+1)로 DCAS.
+			//	재활용된 노드면 Tag가 이미 증가해 이 DCAS가 실패 → 재시도 (null-ABA / Q-E1 차단).
 			//_______________________________________________________________________________________
 			else
 			{
-				if (nullptr == InterlockedCompareExchangePointer
+				NextRef expected;
+				expected.pNode = nullptr;			// low  = 관측한 null
+				expected.Tag   = bTailNextTag;		// high = 관측한 태그
+				if (InterlockedCompareExchange128
 				(
-					(volatile PVOID*)&bTopTailNode.pNode->pNextNode,
-					(PVOID)pnNode,
-					(PVOID)pbTailNextNode
+					(volatile INT64*)&bTopTailNode.pNode->Next,
+					(INT64)(bTailNextTag + 1),		// ExchangeHigh : 새 태그
+					(INT64)pnNode,					// ExchangeLow  : 새 next 포인터
+					(INT64*)&expected
 				))
 				{
-					// Enqueue 성공
-					// tail 밀어준다 (성공여부 판단x)
+					// Enqueue 성공 — tail 밀어준다 (성공여부 판단x)
 					InterlockedCompareExchange128
 					(
 						(volatile INT64*)_ptail,
@@ -308,7 +361,7 @@ public:
 
 			LF_RACE_HOOK();		// [증폭 A] head 스냅샷 ~ next 읽기 사이 창 (D2 재검증이 지키는 구간)
 
-			bHeadNextNode = bTopHeadNode.pNode->pNextNode;
+			bHeadNextNode = bTopHeadNode.pNode->Next.pNode;
 
 			LF_RACE_HOOK();		// [증폭 B] next 읽기 ~ tail 접근/CAS 사이 창 (D1 재검증이 지키는 구간)
 
@@ -388,7 +441,11 @@ public:
 		return true;
 	}
 private:
-	CInternalFreeList<NODE, PlacementNew>* _pFreeList;
+	// PlacementNew는 항상 false로 고정한다: NODE.Next.Tag가 재사용마다 단조 증가해야 하는데,
+	// PlacementNew=true면 프리리스트가 Alloc마다 노드를 재구성(placement new)해 Tag를 0으로
+	// 리셋 → null-ABA 재발. T는 trivially copyable이라 재구성은 어차피 무의미하므로 false로
+	// 고정해도 관측 동작은 동일하다. (그래서 클래스의 PlacementNew 템플릿 인자는 여기서 미사용)
+	CInternalFreeList<NODE, false>* _pFreeList;
 	volatile TopNODE* _phead;
 	volatile TopNODE* _ptail;
 	bool _Initialized;

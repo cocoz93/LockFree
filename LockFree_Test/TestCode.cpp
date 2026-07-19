@@ -11,6 +11,7 @@
 #include <string>
 #include <set>
 #include <unordered_set>
+#include <cstdlib>
 
 //=============================================================================
 // 경합 창 증폭 훅 (USE_RACE_HOOK 빌드 전용)
@@ -35,7 +36,23 @@ static void RaceStall()
         for (int i = 0; i < 4000; ++i) v++;    // ~1µs급: 다른 스레드가 여러 op를 끝낼 시간
     }
 }
+// Enqueue 전용(더 긴) 스톨. Enqueue 결함 창은 tail 노드가 Free→재활용되기까지
+// 수 µs를 기다려야 열리므로, 일반 스톨(~1µs)로는 부족하다. 더 자주(1/4), 더 길게(~30µs)
+// 멈춰 "낡은 tail 스냅샷"과 "재활용된 private 노드"가 시간상 겹치도록 만든다.
+static void RaceStallEnq()
+{
+    unsigned x = t_raceRng;
+    if (x == 0) x = GetCurrentThreadId() * 2654435761u + 101u;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    t_raceRng = x;
+    if ((x & 3u) == 0u)                        // 1/4 확률로 스톨
+    {
+        volatile int v = 0;
+        for (int i = 0; i < 120000; ++i) v++;  // ~30µs급: tail 노드가 재활용될 시간
+    }
+}
 #define LF_RACE_HOOK() RaceStall()
+#define LF_RACE_HOOK_ENQ() RaceStallEnq()
 #endif
 
 #include "LockFree/InternalFreeList.h"
@@ -2166,6 +2183,177 @@ void Queue_Test_Conservation()
 
 
 //=============================================================================
+// Queue Phase 2-4: 멀티스레드 - 생산자별 FIFO(순서 보존) 반증 테스트  [Q-E1]
+//
+// 왜 필요한가:
+//   기존 MT 큐 테스트(ProducerConsumer/HighContention/Conservation)는 개수·중복·
+//   누락·데이터 파손만 본다. Q-E1 결함(재활용된 private tail 노드에 낡은 Enqueue가
+//   링크)은 개수·중복은 보존하고 "생산자별 순서"만 뒤집으므로, 순서 축의 검사가
+//   있어야만 잡힌다.
+//
+// 불변식(올바른 FIFO 큐 + 단일 소비자):
+//   각 생산자는 단일 스레드로 seq=0,1,2,..를 순서대로 넣고, FIFO는 생산자별 순서를
+//   보존하며, 소비자가 하나뿐이라 전량을 Dequeue 순서 그대로 관측한다.
+//   => 어떤 생산자의 seq가 (직전 관측값 + 1)이 아니면 그 자체로 순서 위반 = 결함.
+//   이 불변식은 타이밍과 무관하게 리스트 구조로 성립하므로, 위반은 위양성이 아니다.
+//
+// 재현 설계:
+//   - outstanding 상한으로 큐 깊이를 제한 → 스냅샷된 tail 노드가 곧 Dequeue·Free·
+//     재활용되어 Enqueue 증폭 훅(C/D)이 여는 창과 시간상 겹친다.
+//   - 상한을 (Enqueue 스톨 동안 재활용 가능한 선에서) 넉넉히 잡아, 피해 생산자가
+//     "추월 아이템(s+1)"을 막힘없이 넣게 한다. s는 큐 밖에 매달려 있으므로 리스트에는
+//     s+1이 먼저 들어가고, 소비자는 s+1을 s보다 먼저 관측 → 연속성 위반 확정.
+//   - 값에 (producerId, seq) 인코딩. 첫 위반에서 증거를 남기고 중단.
+//=============================================================================
+static bool RunQueuePerProducerFIFO(int producerCount, int outstandingCap, int durationSeconds)
+{
+    std::cout << "\n[Queue 2-4] 생산자별 FIFO 반증: 생산자 " << producerCount
+              << ", outstanding<=" << outstandingCap << ", " << durationSeconds << "초"
+#ifdef USE_RACE_HOOK
+              << "  (RACE_HOOK ON)"
+#else
+              << "  (RACE_HOOK OFF - 대조군)"
+#endif
+              << std::endl;
+
+    LockFree::CLockFreeQueue<uint64_t> queue;
+    const uint64_t SEQ_SPAN = 1'000'000'000'000ULL;   // producerId 분리 (seq < 1e12 가정)
+
+    std::atomic<int64_t>  outstanding(0);
+    std::atomic<bool>     stop(false);
+    std::atomic<uint64_t> totalDeq(0);
+
+    // 위반 기록 (단일 소비자가 기록, join 뒤 메인이 판정)
+    std::atomic<bool> violated(false);
+    int      vProducer = -1;
+    int64_t  vExpected = -1, vGot = -1;
+
+    std::vector<uint64_t> produced(producerCount, 0);
+
+    // 생산자: 각자 seq=0,1,2,.. 를 (p, seq)로 인코딩해 Enqueue
+    std::vector<std::thread> producers;
+    for (int p = 0; p < producerCount; ++p)
+    {
+        producers.emplace_back([&, p]()
+        {
+            uint64_t seq = 0;
+            while (!stop.load(std::memory_order_relaxed))
+            {
+                // 큐를 얕게 유지: 미결 건수가 상한 이상이면 스핀 대기(잠들면 경합이 식음)
+                while (outstanding.load(std::memory_order_relaxed) >= outstandingCap
+                       && !stop.load(std::memory_order_relaxed))
+                    YieldProcessor();
+                if (stop.load(std::memory_order_relaxed)) break;
+
+                uint64_t v = (uint64_t)p * SEQ_SPAN + seq;
+                if (queue.Enqueue(v))
+                {
+                    outstanding.fetch_add(1, std::memory_order_relaxed);
+                    ++seq;
+                }
+            }
+            produced[p] = seq;
+        });
+    }
+
+    // 단일 소비자: 관측 순서 = Dequeue 순서. 생산자별 연속성(strict +1) 검사
+    std::vector<int64_t> lastSeq(producerCount, -1);
+    std::thread consumer([&]()
+    {
+        uint64_t v;
+        while (!stop.load(std::memory_order_relaxed))
+        {
+            if (!queue.Dequeue(&v))
+                continue;
+            outstanding.fetch_sub(1, std::memory_order_relaxed);
+
+            int     p = (int)(v / SEQ_SPAN);
+            int64_t s = (int64_t)(v % SEQ_SPAN);
+            if (p < 0 || p >= producerCount)         // 인코딩 파손 방어
+            {
+                vProducer = p; vExpected = -777; vGot = s;
+                violated = true; stop = true; break;
+            }
+            if (s != lastSeq[p] + 1)                 // ★ 생산자별 연속성 위반 = Q-E1
+            {
+                vProducer = p; vExpected = lastSeq[p] + 1; vGot = s;
+                violated = true; stop = true; break;
+            }
+            lastSeq[p] = s;
+            totalDeq.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+
+    // 시간 예산 + 1초 하트비트
+    auto start = std::chrono::steady_clock::now();
+    while (!stop.load() &&
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(durationSeconds))
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        std::cout << "  .. 경과 "
+                  << std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::steady_clock::now() - start).count()
+                  << "초, dequeued=" << totalDeq.load()
+                  << ", outstanding=" << outstanding.load() << std::endl;
+    }
+    stop = true;
+
+    for (auto& t : producers) t.join();
+    consumer.join();
+
+    if (violated.load())
+    {
+        std::cout << "\n[REPRO] *** 생산자별 FIFO 위반 재현 - Q-E1 확정" << std::endl;
+        std::cout << "        producer=" << vProducer
+                  << ", expected_seq=" << vExpected
+                  << ", got_seq=" << vGot << std::endl;
+        std::cout << "        해석: 이 생산자의 이전 아이템(seq=" << vExpected
+                  << ")이 큐 밖 노드에 매달려, 이후 아이템(seq=" << vGot
+                  << ")이 먼저 관측됨." << std::endl;
+        std::cout << "        위반 전 정상 dequeued=" << totalDeq.load() << std::endl;
+        return true;
+    }
+
+    // 위반 없이 끝난 경우: 잔여 드레인하며 연속성·개수 보존까지 확인 (대조군 신뢰도)
+    uint64_t v;
+    while (queue.Dequeue(&v))
+    {
+        int     p = (int)(v / SEQ_SPAN);
+        int64_t s = (int64_t)(v % SEQ_SPAN);
+        if (p < 0 || p >= producerCount || s != lastSeq[p] + 1)
+        {
+            std::cout << "\n[REPRO] *** (드레인 중) 생산자별 FIFO 위반 - Q-E1 확정" << std::endl;
+            std::cout << "        producer=" << p << ", expected_seq=" << (lastSeq[p] + 1)
+                      << ", got_seq=" << s << std::endl;
+            return true;
+        }
+        lastSeq[p] = s;
+        totalDeq.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    uint64_t producedTotal = 0;
+    for (int p = 0; p < producerCount; ++p) producedTotal += produced[p];
+    bool conserved = (totalDeq.load() == producedTotal);
+    std::cout << "  > 위반 미검출. dequeued=" << totalDeq.load()
+              << " / produced=" << producedTotal
+              << (conserved ? "  (개수 보존 OK)" : "  ★개수 불일치(유실)!") << std::endl;
+    return !conserved;   // 개수 불일치도 결함 신호
+}
+
+void Queue_Test_PerProducerFIFO()
+{
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "[Queue 2-4] 생산자별 FIFO(순서 보존) 반증 테스트" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    bool repro = RunQueuePerProducerFIFO(8, 64, 60);
+    std::cout << "\n[RESULT] " << (repro ? "순서 위반/유실 검출됨 (결함 재현)"
+                                         : "이번 실행에서는 위반 미검출") << std::endl;
+    g_testCount++;
+}
+
+
+//=============================================================================
 // 메뉴 출력
 //=============================================================================
 void PrintMenu()
@@ -2178,6 +2366,7 @@ void PrintMenu()
     std::cout << "  3. LockFreeQueue 전체 테스트" << std::endl;
     std::cout << "  4. 전체 통합 테스트 (FreeList + Stack + Queue)" << std::endl;
     std::cout << "  5. 보존 불변식 빠른 검증 (Stack + Queue, 약 1분)" << std::endl;
+    std::cout << "  6. Queue 생산자별 FIFO 반증 (Q-E1, 약 1분)" << std::endl;
     std::cout << "  0. 종료" << std::endl;
     std::cout << "========================================" << std::endl;
     std::cout << "선택: ";
@@ -2186,12 +2375,40 @@ void PrintMenu()
 //=============================================================================
 // Main
 //=============================================================================
-int main()
+int main(int argc, char** argv)
 {
     std::cout << "========================================" << std::endl;
     std::cout << "  LockFree 자료구조 통합 테스트 시스템" << std::endl;
     std::cout << "  목표: 100% 안전성 확보" << std::endl;
     std::cout << "========================================" << std::endl;
+
+    // Headless 진입: 인자가 있으면 해당 테스트만 실행하고 종료 (메뉴/cls 없이 선형 출력)
+    //   예) TestCode.exe repro [producers] [outstandingCap] [seconds]
+    //   종료코드: 0=위반 미검출, 2=결함 재현, 1=인자 오류
+    if (argc >= 2)
+    {
+        std::string mode = argv[1];
+        if (mode == "repro")
+        {
+            int producers = (argc >= 3) ? std::atoi(argv[2]) : 8;
+            int cap       = (argc >= 4) ? std::atoi(argv[3]) : 64;
+            int secs      = (argc >= 5) ? std::atoi(argv[4]) : 60;
+            bool r = RunQueuePerProducerFIFO(producers, cap, secs);
+            std::cout << "\n[EXIT] repro " << (r ? "= 위반 검출(결함 재현)" : "= 위반 미검출") << std::endl;
+            return r ? 2 : 0;
+        }
+        if (mode == "cons")
+        {
+            // 보존 불변식(허위 empty·HANG·유실/중복) 회귀 검증. 선형 출력(cls 없음).
+            // 실패 시 내부에서 Crash()로 비정상 종료하므로, 여기 도달=PASS.
+            Stack_Test_Conservation();
+            Queue_Test_Conservation();
+            std::cout << "\n[EXIT] cons = PASS (크래시 없이 완주)" << std::endl;
+            return 0;
+        }
+        std::cout << "알 수 없는 모드: " << mode << std::endl;
+        return 1;
+    }
 
     while (true)
     {
@@ -2265,6 +2482,11 @@ int main()
                 std::cout << "\n[보존 불변식 빠른 검증]" << std::endl;
                 Stack_Test_Conservation();
                 Queue_Test_Conservation();
+                break;
+
+            case 6:
+                std::cout << "\n[Queue 생산자별 FIFO 반증]" << std::endl;
+                Queue_Test_PerProducerFIFO();
                 break;
 
             default:
