@@ -5,6 +5,7 @@
 #define ____LOCKFREE_QUEUE_H____
 
 #include <atomic>
+#include <type_traits>
 #include "InternalFreeList.h"
 
 // 경합 창 증폭 지점 (검증 훅)
@@ -23,6 +24,11 @@ namespace LockFree
 template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
 class CLockFreeQueue
 {
+	// Dequeue는 DCAS 승리 전에 Data를 복사한다(패배 시 폐기 — 재활용 중인 노드를 읽을 수 있음).
+	// 찢긴/미구성 메모리를 복사해도 안전해야 하므로 trivially copyable T만 허용.
+	static_assert(std::is_trivially_copyable_v<T>,
+		"CLockFreeQueue<T>: T must be trivially copyable");
+
 	//-----------------------------------------------------
 	struct NODE
 	{
@@ -70,8 +76,6 @@ public:
 		_Initialized = false;
 		if constexpr (UseApproxSize)
 			_UseSize.store(0, std::memory_order_relaxed);
-		_HeadUniqueCount = 0;
-		_TailUniqueCount = 0;
 
 		Init();
 	}
@@ -129,8 +133,6 @@ public:
 
 		if constexpr (UseApproxSize)
 			_UseSize.store(0, std::memory_order_relaxed);
-		_HeadUniqueCount = 0;
-		_TailUniqueCount = 0;
 
 		_Initialized = true;
 		return true;
@@ -172,8 +174,6 @@ public:
 
 		if constexpr (UseApproxSize)
 			_UseSize.store(0, std::memory_order_relaxed);
-		_HeadUniqueCount = 0;
-		_TailUniqueCount = 0;
 	}
 
 	// 락프리 특성상 정확한 사이즈 보장 불가 (관측용 대략값)
@@ -207,9 +207,8 @@ public:
 			return false;
 
 		pnNode->Data = Data;
-		pnNode->pNextNode = nullptr;				// Enqueue는 pNext가 nullptr일 경우에만 
+		pnNode->pNextNode = nullptr;				// Enqueue는 pNext가 nullptr일 경우에만
 
-		INT64 lTailUniqueCount = InterlockedIncrement64(&this->_TailUniqueCount);
 		CASBackoff backoff;
 
 		// 노드가 추가되면 Enqueue성공 간주. tail밀기 실패는 상관X
@@ -234,12 +233,12 @@ public:
 			//_______________________________________________________________________________________
 			if (nullptr != pbTailNextNode)
 			{
-				lTailUniqueCount = InterlockedIncrement64(&this->_TailUniqueCount);
-
+				// 태그 = 관측값+1 (지역). 설치는 이 라인의 CAS로 직렬화되므로 위치별로
+				// (노드,태그) 쌍이 재발하지 않음 — ABA 방지에 충분 (스택 Pop·프리리스트 Alloc과 동일 방식)
 				InterlockedCompareExchange128
 				(
 					(volatile INT64*)_ptail,
-					(INT64)lTailUniqueCount,
+					(INT64)(bTopTailNode.UniqueCount + 1),
 					(INT64)pbTailNextNode,
 					(INT64*)&bTopTailNode
 				);
@@ -260,12 +259,12 @@ public:
 					(PVOID)pbTailNextNode
 				))
 				{
-					// Enqueue 성공 
+					// Enqueue 성공
 					// tail 밀어준다 (성공여부 판단x)
 					InterlockedCompareExchange128
 					(
 						(volatile INT64*)_ptail,
-						(INT64)lTailUniqueCount,
+						(INT64)(bTopTailNode.UniqueCount + 1),
 						(INT64)pnNode,
 						(INT64*)&bTopTailNode
 					);
@@ -285,9 +284,6 @@ public:
 
 	bool Dequeue(T* pOutData)
 	{
-		INT64 lHeadUniqueCount = InterlockedIncrement64(&this->_HeadUniqueCount);
-		INT64 lTailUniqueCount;
-
 		TopNODE	 bTopHeadNode;
 		TopNODE	 bTopTailNode;
 		NODE* bHeadNextNode;
@@ -343,12 +339,10 @@ public:
 			// head==tail: Enqueue 직후 tail이 안 밀린 상태 — tail push 후 재시도 (댕글링 방지)
 			if (bTopHeadNode.pNode == bTopTailNode.pNode)
 			{
-				lTailUniqueCount = InterlockedIncrement64((volatile INT64*)&this->_TailUniqueCount);
-
 				InterlockedCompareExchange128
 				(
 					(volatile INT64*)_ptail,
-					(INT64)lTailUniqueCount,
+					(INT64)(bTopTailNode.UniqueCount + 1),
 					(INT64)bHeadNextNode,
 					(INT64*)&bTopTailNode
 				);
@@ -365,10 +359,11 @@ public:
 
 			*pOutData = bHeadNextNode->Data;
 
+			// 태그 = 관측값+1 (지역) — Enqueue tail 태그와 동일 원리
 			if (false == InterlockedCompareExchange128
 			(
 				(volatile INT64*)this->_phead,
-				(INT64)lHeadUniqueCount,
+				(INT64)(bTopHeadNode.UniqueCount + 1),
 				(INT64)bHeadNextNode,
 				(INT64*)&bTopHeadNode
 			))
@@ -398,8 +393,6 @@ private:
 	volatile TopNODE* _ptail;
 	bool _Initialized;
 	alignas(64) std::atomic<INT64> _UseSize;
-	alignas(64) volatile INT64 _HeadUniqueCount;
-	alignas(64) volatile INT64 _TailUniqueCount;
 };
 
 }
