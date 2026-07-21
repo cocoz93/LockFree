@@ -65,8 +65,12 @@ public:
 		//       인스턴스 절대 주소의 64바이트 정렬은 미보장. 다만 ChunkNODE 크기가 수십~수백KB이므로
 		//       인접 인스턴스의 FreeCount끼리 같은 캐시라인에 올 가능성은 물리적으로 없음.
 		alignas(64) volatile SHORT FreeCount;
-		// DataArr가 FreeCount와 AllocCount 사이에 위치하여 물리적 캐시 라인 분리
-		ChunkDATA DataArr[CHUNK_SIZE];
+		// [false sharing 수정] DataArr에 alignas(64)를 줘 오프셋 64에서 시작시킨다. 이러면
+		// FreeCount(offset 0, 2바이트)는 뒤따르는 62바이트 패딩과만 라인을 공유하고 DataArr[0]은
+		// 다음 캐시라인으로 밀려난다. 이전에는 DataArr[0]이 FreeCount와 같은 라인이라, 다른 스레드의
+		// Free가 InterlockedDecrement16으로 그 라인을 무효화할 때마다 슬롯0 소유 스레드의 DataArr[0]
+		// 접근이 cross-core 캐시미스로 떨어졌다. (오프셋 차 64면 절대주소가 16정렬이어도 서로 다른 라인)
+		alignas(64) ChunkDATA DataArr[CHUNK_SIZE];
 		// AllocCount는 TLS 소유 스레드만 접근 → volatile 불필요, FreeCount와 별도 캐시 라인
 		SHORT AllocCount;
 		LONG64 Config;
