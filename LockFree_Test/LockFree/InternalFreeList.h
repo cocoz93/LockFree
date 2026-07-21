@@ -83,7 +83,7 @@ namespace LockFree
 				this->_Initialized = false;
 				this->_AllocCount = 0;
 				if constexpr (UseApproxSize)
-					_FreeListSize.store(0, std::memory_order_relaxed);
+					_FreeListSize = 0;
 
 				Init();
 			}
@@ -201,7 +201,7 @@ namespace LockFree
 				//_______________________________________________________________________________________
 
 				if constexpr (UseApproxSize)
-					_FreeListSize.fetch_add(1, std::memory_order_relaxed);
+					InterlockedIncrement64(&_FreeListSize);
 
 				return true;
 			}
@@ -279,7 +279,7 @@ namespace LockFree
 					new (&rNode->Data) T;
 
 				if constexpr (UseApproxSize)
-					_FreeListSize.fetch_sub(1, std::memory_order_relaxed);
+					InterlockedDecrement64(&_FreeListSize);
 
 				return NodeToData(rNode);
 			}
@@ -293,7 +293,7 @@ namespace LockFree
 			INT64 GetFreeListSize() const
 			{
 				if constexpr (UseApproxSize)
-					return _FreeListSize.load(std::memory_order_relaxed);
+					return _FreeListSize;
 
 				return 0;
 			}
@@ -304,7 +304,7 @@ namespace LockFree
 			bool _Initialized;
 
 			alignas(64) volatile INT64	_AllocCount;	// HeapAlloc된 전체 노드 수
-			alignas(64) std::atomic<INT64> _FreeListSize; // FreeList가 가지고있는 size
+			alignas(64) volatile INT64 _FreeListSize; // FreeList가 가지고있는 size
 		};
 
 }

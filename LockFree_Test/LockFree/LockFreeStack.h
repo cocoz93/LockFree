@@ -60,7 +60,7 @@ public:
 		_pTopNode = nullptr;
 		_Initialized = false;
 		if constexpr (UseApproxSize)
-			_UseSize.store(0, std::memory_order_relaxed);
+			_UseSize = 0;
 
 		Init();
 	}
@@ -116,7 +116,7 @@ public:
 	bool IsEmpty(void)
 	{
 		if constexpr (UseApproxSize)
-			return (_UseSize.load(std::memory_order_relaxed) == 0);
+			return (_UseSize == 0);
 
 		return this->_pTopNode->pNode == nullptr;
 	}
@@ -124,7 +124,7 @@ public:
 	INT64 GetApproxSize(void) const
 	{
 		if constexpr (UseApproxSize)
-			return _UseSize.load(std::memory_order_relaxed);
+			return _UseSize;
 
 		return 0;
 	}
@@ -206,7 +206,7 @@ public:
 		//_______________________________________________________________________________________
 
 		if constexpr (UseApproxSize)
-			_UseSize.fetch_add(1, std::memory_order_relaxed);
+			InterlockedIncrement64(&_UseSize);
 
 		//_______________________________________________________________________________________
 		//
@@ -263,7 +263,7 @@ public:
 		*pOutData = bTopNode.pNode->Data;
 		this->_pFreeList->Free(bTopNode.pNode);
 		if constexpr (UseApproxSize)
-			_UseSize.fetch_sub(1, std::memory_order_relaxed);
+			InterlockedDecrement64(&_UseSize);
 
 		return true;
 	}
@@ -272,7 +272,7 @@ private:
 	CInternalFreeList<NODE>*	_pFreeList;
 	TopNODE*			_pTopNode;
 	bool				_Initialized;
-	alignas(64) std::atomic<INT64> _UseSize;
+	alignas(64) volatile INT64 _UseSize;
 };
 }
 

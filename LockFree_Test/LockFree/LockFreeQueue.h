@@ -97,7 +97,7 @@ public:
 		_ptail = nullptr;
 		_Initialized = false;
 		if constexpr (UseApproxSize)
-			_UseSize.store(0, std::memory_order_relaxed);
+			_UseSize = 0;
 
 		Init();
 	}
@@ -159,7 +159,7 @@ public:
 		_ptail->UniqueCount = 0;
 
 		if constexpr (UseApproxSize)
-			_UseSize.store(0, std::memory_order_relaxed);
+			_UseSize = 0;
 
 		_Initialized = true;
 		return true;
@@ -200,14 +200,14 @@ public:
 		_ptail->pNode = _phead->pNode;
 
 		if constexpr (UseApproxSize)
-			_UseSize.store(0, std::memory_order_relaxed);
+			_UseSize = 0;
 	}
 
 	// 락프리 특성상 정확한 사이즈 보장 불가 (관측용 대략값)
 	bool IsEmpty(void)
 	{
 		if constexpr (UseApproxSize)
-			return (_UseSize.load(std::memory_order_relaxed) == 0);
+			return (_UseSize == 0);
 
 		if (_Initialized == false || _phead == nullptr)
 			return true;
@@ -219,7 +219,7 @@ public:
 	INT64 GetApproxSize(void) const
 	{
 		if constexpr (UseApproxSize)
-			return _UseSize.load(std::memory_order_relaxed);
+			return _UseSize;
 
 		return 0;
 	}
@@ -330,7 +330,7 @@ public:
 		}
 
 		if constexpr (UseApproxSize)
-			this->_UseSize.fetch_add(1, std::memory_order_relaxed);
+			InterlockedIncrement64(&this->_UseSize);
 		return true;
 	}
 
@@ -436,7 +436,7 @@ public:
 		// CAS128()가 Comp쪽으로 뱉어준 원래노드를 해제
 		this->_pFreeList->Free(bTopHeadNode.pNode);
 		if constexpr (UseApproxSize)
-			this->_UseSize.fetch_sub(1, std::memory_order_relaxed);
+			InterlockedDecrement64(&this->_UseSize);
 
 		return true;
 	}
@@ -449,7 +449,7 @@ private:
 	volatile TopNODE* _phead;
 	volatile TopNODE* _ptail;
 	bool _Initialized;
-	alignas(64) std::atomic<INT64> _UseSize;
+	alignas(64) volatile INT64 _UseSize;
 };
 
 }
