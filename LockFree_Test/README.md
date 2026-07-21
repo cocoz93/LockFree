@@ -1,6 +1,6 @@
 # LockFree 자료구조 결함 테스트
 
-Lock-free 자료구조(`InternalFreeList`, `LockFreeStack`, `LockFreeQueue`)의 무결성을 검증하는 테스트 프로그램.
+Lock-free 자료구조(`InternalFreeList`, `LockFreeStack`, `LockFreeQueue`, `CExternalTlsFreeList`)의 무결성을 검증하는 테스트 프로그램.
 
 ```
 테스트 대상         싱글 스레드 (기능)           멀티스레드 (경합)
@@ -60,6 +60,15 @@ LockFreeQueue       1-1 FIFO 순서 + 무결성      2-1 전수 검증 (8가지 
 | 2-1 | MT, 8가지 조합 | Producer가 고유 숫자 Enqueue, Consumer가 Dequeue. 모든 숫자가 정확히 1번만 Dequeue되었는지 전수 검증 |
 | 2-2 | MT, 2~32 스레드 | 짝수 스레드 Enqueue(checksum 기록), 홀수 스레드 Dequeue(checksum 검증). 잔여 drain 후 Enqueue 수 == Dequeue 수 확인 |
 
+### CExternalTlsFreeList (헤드리스 2종)
+
+| 모드 | 구분 | 내용 |
+|------|------|------|
+| `tls` | MT, 시간예산 | 생산자→소비자 크로스스레드 Alloc/Free. "나가 있는 슬롯" 집합으로 이중 배부·이중 free·데이터 손상·보존(Alloc==Free) 불변식을 검사. 종료코드 0=무결, 2=위반 |
+| `tlsleak` | MT, 관측 | 각 스레드가 청크를 소진하지 않고 몇 개만 Alloc→전부 Free 후 종료. 미소진 청크가 회수되지 않아 누적되는지 관측(알려진 설계 한계라 항상 종료코드 0) |
+
+> 스택/큐의 인터랙티브 메뉴(1~4)와 달리 헤드리스 CLI로 실행한다 — 아래 "실행 방법" 참고.
+
 ---
 
 ## 반복 횟수 설계 근거
@@ -76,3 +85,12 @@ LockFreeQueue       1-1 FIFO 순서 + 무결성      2-1 전수 검증 (8가지 
 2. LockFreeStack 전체 테스트
 3. LockFreeQueue 전체 테스트
 4. 전체 통합 테스트
+
+### 헤드리스 모드 (외부풀 — CLI 인자)
+
+외부풀은 인터랙티브 메뉴 대신, 종료코드로 결과를 받는 회귀/자동화용 모드로 실행한다:
+
+```
+TestCode.exe tls     [prod=4] [cons=4] [secs=30]   # 크로스스레드 정합성  (0=무결, 2=위반)
+TestCode.exe tlsleak [rounds=20] [tpr=4] [apt=5]   # 스레드 종료 누수 관측 (항상 0)
+```
