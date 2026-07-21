@@ -58,6 +58,7 @@ static void RaceStallEnq()
 #include "LockFree/InternalFreeList.h"
 #include "LockFree/LockFreeStack.h"
 #include "LockFree/LockFreeQueue.h"
+#include "LockFree/ExternalTlsFreeList.h"
 
 //=============================================================================
 // 테스트 설정 상수 (반복 횟수 조절 가능)
@@ -2456,6 +2457,206 @@ static bool RunFreeListStress(int threadCount, int durationSeconds)
 
 
 //=============================================================================
+// ExternalTlsFreeList 크로스스레드 정합성 (headless, 시간예산)
+//
+// 의도된 사용 패턴 그대로: 생산자가 Alloc→서명→넘김, 소비자가 받아서 검증→Free.
+// (Free의 FreeCount 크로스스레드 감소 + 청크 반환/재사용 경로를 직접 때린다)
+//
+// 불변식(전역 "나가 있는 슬롯" 집합으로 정밀 검사):
+//   - 이중 배부 금지: Alloc이 이미 나가 있는 슬롯을 또 돌려주면 안 됨 (집합 insert 실패로 탐지)
+//   - 이중/미할당 free 금지: Free 대상은 반드시 나가 있어야 함 (집합 erase==1 로 탐지)
+//   - 데이터 손상 금지: 소비자가 받은 서명은 자기일관적이어야 함 (Verify)
+//   - 보존: 총 Alloc==Free, 종료 후 나가 있는 슬롯 0
+//=============================================================================
+static bool RunExternalTlsStress(int producerCount, int consumerCount, int durationSeconds)
+{
+    std::cout << "\n[ExternalTls 스트레스] 생산자 " << producerCount << ", 소비자 " << consumerCount
+              << ", " << durationSeconds << "초"
+#ifdef USE_RACE_HOOK
+              << "  (RACE_HOOK ON)"
+#else
+              << "  (RACE_HOOK OFF - 대조군)"
+#endif
+              << std::endl;
+
+    LockFree::CExternalTlsFreeList<TestPayload> pool(false, 16);
+
+    std::mutex handoffMtx;
+    std::vector<TestPayload*> handoff;
+    std::atomic<int64_t> handoffSize(0);
+    const int64_t HANDOFF_CAP = 200000;              // 생산자 백프레셔(메모리 상한)
+
+    std::mutex setMtx;
+    std::unordered_set<TestPayload*> outstanding;    // 현재 나가 있는(alloc됐고 free 전) 슬롯
+
+    std::atomic<bool>     stop(false), bug(false), producersDone(false);
+    std::atomic<uint64_t> allocs(0), frees(0);
+    std::string bugMsg;
+    std::mutex bugMtx;
+    auto reportBug = [&](const std::string& m) {
+        { std::lock_guard<std::mutex> lk(bugMtx); if (!bug.exchange(true)) bugMsg = m; }
+        stop = true;
+    };
+
+    std::vector<std::thread> producers, consumers;
+
+    for (int t = 0; t < producerCount; ++t)
+    {
+        producers.emplace_back([&, t]()
+        {
+            uint32_t seq = 0;
+            while (!stop.load(std::memory_order_relaxed))
+            {
+                while (handoffSize.load(std::memory_order_relaxed) > HANDOFF_CAP
+                       && !stop.load(std::memory_order_relaxed))
+                    YieldProcessor();
+
+                TestPayload* p = pool.Alloc();
+                if (p == nullptr) { reportBug("Alloc이 nullptr 반환"); return; }
+
+                {
+                    std::lock_guard<std::mutex> lk(setMtx);
+                    if (!outstanding.insert(p).second)
+                    { reportBug("이중 배부: 이미 나가 있는 슬롯을 또 Alloc함"); return; }
+                }
+                p->Init((uint32_t)t, seq++);
+                allocs.fetch_add(1, std::memory_order_relaxed);
+
+                {
+                    std::lock_guard<std::mutex> lk(handoffMtx);
+                    handoff.push_back(p);
+                }
+                handoffSize.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    for (int t = 0; t < consumerCount; ++t)
+    {
+        consumers.emplace_back([&]()
+        {
+            while (true)
+            {
+                TestPayload* p = nullptr;
+                {
+                    std::lock_guard<std::mutex> lk(handoffMtx);
+                    if (!handoff.empty()) { p = handoff.back(); handoff.pop_back(); }
+                }
+                if (p == nullptr)
+                {
+                    if (producersDone.load() && handoffSize.load() == 0) return;  // 드레인 완료
+                    YieldProcessor();
+                    continue;
+                }
+                handoffSize.fetch_sub(1, std::memory_order_relaxed);
+
+                if (!p->Verify()) { reportBug("데이터 손상(Verify 실패)"); return; }
+                {
+                    std::lock_guard<std::mutex> lk(setMtx);
+                    if (outstanding.erase(p) != 1)
+                    { reportBug("이중 free 또는 미할당 슬롯 free"); return; }
+                }
+                pool.Free(p);
+                frees.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    auto start = std::chrono::steady_clock::now();
+    while (!stop.load() &&
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(durationSeconds))
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        std::cout << "  .. 경과 "
+                  << std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::steady_clock::now() - start).count()
+                  << "초, alloc=" << allocs.load() << ", free=" << frees.load()
+                  << ", 나가있음=" << handoffSize.load() << std::endl;
+    }
+    stop = true;
+
+    for (auto& t : producers) t.join();
+    producersDone = true;                 // 이제 소비자는 남은 것 드레인 후 종료
+    for (auto& t : consumers) t.join();
+
+    if (bug.load())
+    {
+        std::cout << "\n[REPRO] *** ExternalTls 불변식 위반: " << bugMsg << std::endl;
+        std::cout << "        (alloc=" << allocs.load() << ", free=" << frees.load() << ")" << std::endl;
+        return true;
+    }
+
+    uint64_t a = allocs.load(), f = frees.load();
+    size_t outLeft = outstanding.size();
+    bool ok = (a == f) && (outLeft == 0);
+    std::cout << "  > alloc=" << a << ", free=" << f << ", 종료 후 나가 있는 슬롯=" << outLeft
+              << (ok ? "  (보존 OK)" : "  ★불일치!") << std::endl;
+    return !ok;
+}
+
+
+//=============================================================================
+// ExternalTlsFreeList 스레드 종료 누수 진단 (headless)
+//
+// 각 스레드는 청크(CHUNK_SIZE개 슬롯)를 다 쓰지 않고 몇 개만 Alloc→전부 Free한 뒤 종료한다.
+// (자기가 alloc한 건 전부 free하므로 "사용자 데이터 누수"는 없음)
+// 그래도 배분되지 않은 나머지 슬롯 때문에 FreeCount가 0에 못 닿아, 그 청크는 영영 회수되지
+// 않는다 → 스레드 종료마다 청크 하나씩 샌다. HeapAlloc 청크 누계가 종료 스레드 수만큼
+// 계속 증가하면 누수 확인. (경합 버그가 아니라 설계 한계 — TlsAlloc엔 종료 콜백이 없음)
+//
+// 판정이 아니라 "관찰"이다: 알려진 한계이므로 크래시시키지 않고 수치만 보고한다.
+//=============================================================================
+static bool RunExternalTlsLeakDiag(int rounds, int threadsPerRound, int allocsPerThread)
+{
+    std::cout << "\n[ExternalTls 누수 진단] " << rounds << "라운드 x " << threadsPerRound
+              << "스레드, 스레드당 " << allocsPerThread
+              << "개 Alloc 후 전부 Free하고 종료 (청크는 소진 안 함)" << std::endl;
+
+    LockFree::CExternalTlsFreeList<TestPayload> pool(false, 0);   // warmup 0: 신호 선명하게
+
+    const INT64 startChunks = pool.GetChunkAllocCount();
+    for (int r = 0; r < rounds; ++r)
+    {
+        std::vector<std::thread> ts;
+        for (int t = 0; t < threadsPerRound; ++t)
+        {
+            ts.emplace_back([&]()
+            {
+                std::vector<TestPayload*> local(allocsPerThread, nullptr);
+                for (int k = 0; k < allocsPerThread; ++k)
+                {
+                    local[k] = pool.Alloc();
+                    if (local[k]) local[k]->Init(0, (uint32_t)k);
+                }
+                for (int k = 0; k < allocsPerThread; ++k)   // 자기 것 전부 반납
+                    if (local[k]) pool.Free(local[k]);
+                // 청크를 TLS에 쥔 채 스레드 종료 → 남은 슬롯 때문에 청크 회수 불가
+            });
+        }
+        for (auto& t : ts) t.join();
+
+        if (r == 0 || r == rounds - 1 || (r + 1) % 5 == 0)
+            std::cout << "  라운드 " << (r + 1) << ": HeapAlloc된 청크 누계 = "
+                      << pool.GetChunkAllocCount() << std::endl;
+    }
+
+    const INT64 endChunks = pool.GetChunkAllocCount();
+    const INT64 grew   = endChunks - startChunks;
+    const INT64 exited = (INT64)rounds * threadsPerRound;
+
+    std::cout << "  > 종료한 스레드 수=" << exited
+              << ", 그동안 늘어난 청크 수=" << grew << std::endl;
+
+    // 건강하면 청크가 재사용돼 소수로 수렴. 누수면 종료 스레드 수에 비례해 계속 증가.
+    bool leaked = (grew >= exited / 2);
+    std::cout << (leaked
+        ? "  > 누수 확인: 스레드 종료마다 청크가 회수되지 않아 새로 HeapAlloc됨 (알려진 설계 한계)"
+        : "  > 청크가 재사용됨 (이 실행에선 누수 신호 없음)") << std::endl;
+    return leaked;
+}
+
+
+//=============================================================================
 // 메뉴 출력
 //=============================================================================
 void PrintMenu()
@@ -2516,6 +2717,26 @@ int main(int argc, char** argv)
             bool r = RunFreeListStress(threads, secs);
             std::cout << "\n[EXIT] fl " << (r ? "= 위반 검출(결함)" : "= 위반 미검출") << std::endl;
             return r ? 2 : 0;
+        }
+        if (mode == "tls")
+        {
+            // ExternalTls 크로스스레드 정합성. 종료코드 0=무결, 2=위반.
+            int prod = (argc >= 3) ? std::atoi(argv[2]) : 4;
+            int cons = (argc >= 4) ? std::atoi(argv[3]) : 4;
+            int secs = (argc >= 5) ? std::atoi(argv[4]) : 30;
+            bool r = RunExternalTlsStress(prod, cons, secs);
+            std::cout << "\n[EXIT] tls " << (r ? "= 위반 검출(결함)" : "= 위반 미검출") << std::endl;
+            return r ? 2 : 0;
+        }
+        if (mode == "tlsleak")
+        {
+            // ExternalTls 스레드 종료 누수 진단(관찰용). 알려진 한계라 항상 종료코드 0.
+            int rounds = (argc >= 3) ? std::atoi(argv[2]) : 20;
+            int tpr    = (argc >= 4) ? std::atoi(argv[3]) : 4;
+            int apt    = (argc >= 5) ? std::atoi(argv[4]) : 5;
+            bool leaked = RunExternalTlsLeakDiag(rounds, tpr, apt);
+            std::cout << "\n[EXIT] tlsleak = " << (leaked ? "누수 확인(알려진 한계)" : "누수 신호 없음") << std::endl;
+            return 0;
         }
         std::cout << "알 수 없는 모드: " << mode << std::endl;
         return 1;

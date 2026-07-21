@@ -208,6 +208,10 @@ public:
 		return true;
 	}
 
+	// 진단/모니터링용: 지금까지 HeapAlloc된 청크 총수(단조 증가). 스레드가 청크를 소진하지
+	// 못하고 종료하면 그 청크는 회수·재사용되지 못하므로, 그런 상황이 쌓이면 이 값이 계속 증가한다.
+	INT64 GetChunkAllocCount() const { return _ChunkFreeList->GetAllocCount(); }
+
 private:
 	CInternalFreeList<ChunkNODE>* _ChunkFreeList;
 
