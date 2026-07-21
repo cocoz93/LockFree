@@ -1228,10 +1228,20 @@ void RunStackMTTest(
     {
         consumers.emplace_back([&, consumerId]()
             {
+                uint64_t spinCount = 0;
                 while (true)
                 {
                     if (allProducersDone && totalPopped >= (uint64_t)TOTAL_NUMBERS)
                         break;
+
+                    // 노드 유실/허위 empty 시 영원히 대기하는 대신 명시적 FAIL (4096회마다 시계 확인, 큐 소비자와 동일 패턴)
+                    if ((++spinCount & 0xFFF) == 0 &&
+                        std::chrono::steady_clock::now() - startTime > std::chrono::minutes(5))
+                    {
+                        std::cout << "\n[CRASH] Consumer 타임아웃(5분): Pop 진행 불가 (popped="
+                            << totalPopped << " / " << TOTAL_NUMBERS << ")" << std::endl;
+                        Crash();
+                    }
 
                     int value;
                     if (stack.Pop(&value))
