@@ -74,6 +74,9 @@ public:
 		// AllocCount는 TLS 소유 스레드만 접근 → volatile 불필요, FreeCount와 별도 캐시 라인
 		SHORT AllocCount;
 		LONG64 Config;
+		// 이 청크를 소유한 CExternalTlsFreeList(this) 신원. Free에서 크로스풀 오용 fail-fast용.
+		// (Config/DataConfig 자기일관성은 전역 g_Config 기반이라 남의 풀을 못 걸러 → 인스턴스 신원으로 보강)
+		LONG64 OwnerPoolId;
 											
 	};
 
@@ -179,6 +182,10 @@ public:
 		if (pChunkNode == nullptr)
 			return nullptr;
 
+		// 이 청크는 내(this) 풀 소유임을 표식. 청크는 한 풀 안에서만 재활용되므로 뽑을 때 한 번만 찍으면 된다.
+		// (사용자에게 나가는 모든 슬롯은 반드시 이 경로를 거친다)
+		pChunkNode->OwnerPoolId = reinterpret_cast<LONG64>(this);
+
 		pChunkNode->AllocCount = CHUNK_SIZE - 2; //(반환할거 포함 마이너스)
 		pChunkNode->FreeCount = CHUNK_SIZE;
 
@@ -193,11 +200,16 @@ public:
 
 	bool Free(volatile T* Data)
 	{
-		// 릴리즈는 fail-fast(이 풀의 유효 포인터 전제, delete와 동일).
-		// 디버그에서만 슬롯 자기일관성(DataConfig == 청크 Config)을 assert로 탐지.
-		assert(((ChunkDATA*)Data)->DataConfig == ((ChunkDATA*)Data)->pMyChunkNode->Config && "오염되었거나 이 풀의 슬롯이 아님");
-
 		ChunkNODE* pChunkNode = ((ChunkDATA*)Data)->pMyChunkNode;
+
+		// 크로스풀/오염 포인터는 프리리스트를 조용히 망가뜨려 원인에서 먼 곳에서 죽는다.
+		// release에서도 원인 지점에서 즉시 fail-fast로 터뜨린다 (와일드 포인터/double-free는 못 잡음).
+		//  - 슬롯 자기일관성: 이 풀 슬롯이면 DataConfig == 소속 청크 Config
+		if (((ChunkDATA*)Data)->DataConfig != pChunkNode->Config)
+			__fastfail(FAST_FAIL_INVALID_ARG);
+		//  - 풀 소유권: 이 청크가 내(this) 풀 소유인지 (전역 g_Config 자기참조로는 못 걸르던 구간)
+		if (pChunkNode->OwnerPoolId != reinterpret_cast<LONG64>(this))
+			__fastfail(FAST_FAIL_INVALID_ARG);
 
 		// 소멸자 호출 (free list 반환 전에 호출해야 use-after-free 방지)
 		if (this->_IsPlacementNew)

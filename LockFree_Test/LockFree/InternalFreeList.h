@@ -27,9 +27,7 @@ namespace LockFree
 			struct NODE
 			{
 				NODE* pNextNode;
-#ifndef NDEBUG
-				LONG64	OwnerId;	// 디버그 빌드에서만 존재. Free 시 소속 풀(this) 소유권 assert용
-#endif
+				LONG64	OwnerId;	// 소속 풀(this) 신원. Free 시 크로스풀 오용을 release fail-fast로 탐지
 				T		Data;
 			};
 
@@ -157,9 +155,10 @@ namespace LockFree
 				// Free Node
 				NODE* fNode = DataToNode(Data);
 
-				// 릴리즈는 fail-fast(이 풀의 유효 포인터 전제, delete와 동일).
-				// 디버그에서만 크로스풀 오용을 assert로 탐지 (와일드 포인터/double-free는 못 잡음).
-				assert(fNode->OwnerId == reinterpret_cast<LONG64>(this) && "다른 풀에서 나온 포인터를 Free함");
+				// 크로스풀 오용은 프리리스트를 조용히 오염시켜 원인에서 먼 곳에서 죽는다.
+				// release에서도 원인 지점에서 즉시 fail-fast로 터뜨린다 (와일드 포인터/double-free는 못 잡음).
+				if (fNode->OwnerId != reinterpret_cast<LONG64>(this))
+					__fastfail(FAST_FAIL_INVALID_ARG);
 
 				// 소멸자 호출 (free list 반환 전에 호출해야 use-after-free 방지)
 				if constexpr (PlacementNew)
@@ -219,9 +218,7 @@ namespace LockFree
 
 				new(&rNode->Data) T;
 				rNode->pNextNode = nullptr;
-#ifndef NDEBUG
 				rNode->OwnerId = reinterpret_cast<LONG64>(this);
-#endif
 				InterlockedIncrement64(&this->_AllocCount);
 				return NodeToData(rNode);
 			}
