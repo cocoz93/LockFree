@@ -2489,7 +2489,7 @@ static bool RunExternalTlsStress(int producerCount, int consumerCount, int durat
 #endif
               << std::endl;
 
-    LockFree::CExternalTlsFreeList<TestPayload> pool(false, 16);
+    LockFree::CExternalTlsFreeList<TestPayload> pool(16);
 
     std::mutex handoffMtx;
     std::vector<TestPayload*> handoff;
@@ -2673,7 +2673,7 @@ static bool RunExternalTlsLeakDiag(int rounds, int threadsPerRound, int allocsPe
               << "스레드, 스레드당 " << allocsPerThread
               << "개 Alloc 후 전부 Free하고 종료 (청크는 소진 안 함)" << std::endl;
 
-    LockFree::CExternalTlsFreeList<TestPayload> pool(false, 0);   // warmup 0: 신호 선명하게
+    LockFree::CExternalTlsFreeList<TestPayload> pool(0);   // warmup 0: 신호 선명하게
 
     const INT64 startChunks = pool.GetChunkAllocCount();
     for (int r = 0; r < rounds; ++r)
