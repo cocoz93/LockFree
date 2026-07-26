@@ -36,6 +36,12 @@ class CLockFreeQueue
 	static_assert(std::is_trivially_copyable_v<T>,
 		"CLockFreeQueue<T>: T must be trivially copyable");
 
+	// PlacementNew 인자는 쓰이지 않는다(아래 _pFreeList 주석 — Tag 보존 때문에 내부
+	// 프리리스트를 false로 못 박았다). 받아만 두면 켠 줄 알므로 컴파일 단계에서 막는다.
+	static_assert(!PlacementNew,
+		"CLockFreeQueue<T, PlacementNew>: PlacementNew는 지원하지 않는다 (노드 Tag 보존을 위해 "
+		"내부 프리리스트가 false로 고정됨). 인자를 빼거나 false로 둘 것");
+
 	//-----------------------------------------------------
 	struct NODE;
 
@@ -44,10 +50,11 @@ class CLockFreeQueue
 	// (null, 옛태그) 스냅샷을 든 Enqueue의 링크 DCAS는 반드시 실패한다 → null-ABA(Q-E1) 차단.
 	// cmpxchg16b 요건: &NODE::Next가 16바이트 정렬이어야 함(아래 alignas(16)로 보장).
 	//
-	// 두 필드는 여러 스레드가 동시에 읽고 쓰는 공유 상태라 volatile로 선언한다(TopNODE와 동일).
+	// 두 필드는 여러 스레드가 동시에 읽고 쓰는 공유 상태라 volatile로 선언한다.
 	// 이 파일은 Next를 128비트 원자 로드로 읽지 않고 두 필드를 따로 읽으므로, "태그를 값보다
-	// 먼저" 라는 접근 순서 자체가 정확성의 전제다. 평문이면 컴파일러가 그 순서를 뒤집을 수
-	// 있다(MSVC /O2가 실제로 재배치하는 것을 확인했다).
+	// 먼저" 라는 접근 순서 자체가 정확성의 전제다. volatile이 그 순서를 못 박는다.
+	// (평문으로 두면 MSVC가 두 로드를 뒤집지는 않았지만 인접 문장이 그 사이로 끼어든다.
+	//  즉 "지금 우연히 맞는 코드"를 "규칙상 항상 맞는 코드"로 만드는 값이고, 비용은 명령 2개다)
 	struct NextRef
 	{
 		NODE* volatile pNode;   // low  64
@@ -265,7 +272,8 @@ public:
 			bTopTailNode.UniqueCount = this->_ptail->UniqueCount;
 			bTopTailNode.pNode = this->_ptail->pNode;
 
-			// stale 감지 시 역참조+CAS 회피 (~20-40 cycles 절감)
+			// 스냅샷이 찢겼으면 조기 탈출. 정확성은 아래 재검증과 DCAS가 책임지므로 선택적이고,
+			// 성능 이득도 측정 한계 아래다(옛 주석의 "20-40 cycles 절감"은 실측으로 반증됨).
 			if (bTopTailNode.UniqueCount != this->_ptail->UniqueCount)
 				continue;
 
@@ -290,9 +298,13 @@ public:
 			// 스냅샷 tail 노드가 그새 Dequeue·Free·재활용됐다면 tail 태그(UniqueCount)가 이미
 			// 바뀌어 여기서 걸러진다(낡은 tail 노드 감지). 이 재검증만으로는 재검증~CAS 사이
 			// 잔여 창이 남지만, 아래 링크가 counted-next DCAS라 그 창의 재활용도 next Tag로
-			// 감지된다. 즉 null-ABA(Q-E1)는 세 가지가 함께 닫는다 —
+			// 감지된다. 즉 null-ABA(Q-E1)를 닫는 것은 —
 			//   (1) 재사용 초기화의 Tag 선행  (2) 여기 tail 재검증  (3) counted-next DCAS.
-			// 셋 중 하나라도 빠지면 뚫린다.
+			// 실제로 짐을 지는 것은 (2)와 (3)이고, 둘 중 하나만 빠져도 뚫린다. (1)은 지금
+			// 구조에선 중복이다 — 노드가 Free되려면 반드시 링크를 거치고 링크가 Tag를 올리므로
+			// 낡은 스냅샷의 Tag는 재활용 시점에 이미 지나가 있어 (3)이 걸러낸다.
+			// 그래도 명령 1개라 남겨둔다: 스냅샷을 Tag 선행으로 읽지 않게 바뀌면 (1)이 유일한
+			// 방어가 된다.
 			if (bTopTailNode.UniqueCount != this->_ptail->UniqueCount)
 				continue;
 
@@ -376,7 +388,8 @@ public:
 			bTopHeadNode.UniqueCount = this->_phead->UniqueCount;
 			bTopHeadNode.pNode = this->_phead->pNode;
 
-			// stale 감지 시 역참조+CAS 회피 (~20-40 cycles 절감)
+			// 스냅샷이 찢겼으면 조기 탈출. 정확성은 아래 재검증과 DCAS가 책임지므로 선택적이고,
+			// 성능 이득도 측정 한계 아래다(옛 주석의 "20-40 cycles 절감"은 실측으로 반증됨).
 			if (bTopHeadNode.UniqueCount != this->_phead->UniqueCount)
 				continue;
 

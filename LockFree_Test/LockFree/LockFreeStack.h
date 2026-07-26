@@ -25,10 +25,9 @@ class CLockFreeStack
 		T		Data;
 	};
 
-	// volatile은 멤버가 아니라 "포인터"(_pTopNode)에 둔다 — 큐(TopNODE)와 동일 관용구.
-	// 멤버에 붙이면 지역 스냅샷(TopNODE bTopNode)까지 volatile을 물려받아 레지스터에
-	// 못 올라가고 반복마다 스택을 왕복한다(실측 싱글스레드 Pop -9%).
-	// 공유 인스턴스 접근은 volatile 포인터를 거치므로 보장은 동일하다.
+	// volatile은 멤버가 아니라 포인터(_pTopNode)에 둔다 — 큐와 동일 관용구.
+	// 멤버에 붙이면 지역 스냅샷(TopNODE bTopNode)까지 물려받아 레지스터에 못 올라가고
+	// 반복마다 스택을 왕복한다. 공유 접근은 volatile 포인터를 거치므로 보장은 동일.
 	struct TopNODE
 	{
 		NODE*	pNode;
@@ -238,7 +237,9 @@ public:
 
 			_mm_prefetch((const char*)bTopNode.pNode, _MM_HINT_T0);
 
-			//CAS를 덜 호출하기위해, 이미 자료구조가 바뀌었다면 다시시도.
+			// 태그 재확인: 스냅샷이 찢겼으면 DCAS를 안 쏘고 재시도. 정확성은 아래 DCAS의
+			// 태그 비교가 책임진다. 성능 이득은 측정 한계 아래였다(싱글스레드 영향 없음) —
+			// 조기 탈출 의도로만 남겨둔다.
 			if (bTopNode.UniqueCount != this->_pTopNode->UniqueCount)
 				continue;
 

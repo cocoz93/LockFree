@@ -23,10 +23,14 @@ public:
 		LONG64 DataConfig;
 	};
 
-	// 목표 청크 크기(256KB)에 맞춰 sizeof(T) 기반으로 청크 원소 수를 컴파일 타임 산출
+	// 청크 원소 수를 sizeof(T) 기반으로 컴파일 타임 산출.
+	// 256KB는 "목표"일 뿐 원소 수 상·하한이 우선이라, 작은 T는 상한에 걸려 더 작아지고
+	// (T=16B → 62KB) 큰 T는 하한에 걸려 훨씬 커진다(T=64KB → 6.3MB).
+	// 큰 T를 담을 땐 생성자의 warmupChunkCount와 곱해지므로 워밍업 수를 반드시 조정할 것.
 	static constexpr size_t TARGET_CHUNK_BYTES = 256 * 1024;
 	static constexpr int    MIN_CHUNK_COUNT    = 100;
 	static constexpr int    MAX_CHUNK_COUNT    = 2000;
+	static_assert(MAX_CHUNK_COUNT <= 32767, "CHUNK_SIZE는 SHORT인 AllocCount/FreeCount 범위를 넘을 수 없다");
 
 	static constexpr int CalcChunkSize()
 	{
@@ -91,9 +95,14 @@ public:
 	// warmupChunkCount: 시작 시 미리 만들어둘 청크 수. 보통 동시 사용 스레드 수만큼 주면
 	//                   각 스레드의 첫 Alloc이 HeapAlloc 없이 처리된다. 0이면 워밍업 생략(lazy).
 	//
-	// [수명 계약] 슬롯의 T는 청크가 만들어질 때 1회 생성되고 풀이 소멸할 때 1회 소멸된다.
-	// Alloc/Free는 생성자·소멸자를 부르지 않는다 — 재사용이 이 풀의 존재 이유다.
-	// 따라서 Alloc이 돌려주는 객체는 이전 사용자가 쓰던 상태 그대로이고, 초기화는 사용자 책임.
+	// [수명 계약] 슬롯의 T는 청크가 만들어질 때 1회 생성된다. Alloc/Free는 생성자·소멸자를
+	// 부르지 않는다 — 재사용이 이 풀의 존재 이유다. 따라서 Alloc이 돌려주는 객체는 이전
+	// 사용자가 쓰던 상태 그대로이고, 초기화는 사용자 책임.
+	//
+	// 소멸은 보장하지 않는다. 풀 소멸자가 파괴하는 것은 내부 프리리스트에 회수된 청크뿐이라,
+	// 스레드가 TLS에 쥔 채 끝냈거나 일부만 반납된 청크는 메모리만 반환되고 T의 소멸자는
+	// 호출되지 않는다. => T는 소멸자가 안 불려도 되는 타입이어야 한다.
+	// (프로세스 수명 내내 사는 풀이면 종료 시 OS가 회수하므로 실질 무해)
 	//
 	// 내부 풀(CInternalFreeList)의 PlacementNew=true처럼 Alloc/Free마다 생성·소멸시키는 모드는
 	// 여기선 제공하지 않는다. 내부 풀은 NODE에 생성자가 없어 "HeapAlloc 후 명시적 placement new"가

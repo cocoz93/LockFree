@@ -45,10 +45,9 @@ namespace LockFree
 				return &node->Data;
 			}
 
-			// volatile은 멤버가 아니라 "포인터"(_pTopNode)에 둔다 — 큐(TopNODE)와 동일 관용구.
-			// 멤버에 붙이면 지역 스냅샷(TopNODE bTopNode)까지 volatile을 물려받아 레지스터에
-			// 못 올라가고 반복마다 스택을 왕복한다(Alloc 루프에 재로드 15회, 실측 싱글스레드 -9%).
-			// 공유 인스턴스 접근은 volatile 포인터를 거치므로 보장은 동일하다.
+			// volatile은 멤버가 아니라 포인터(_pTopNode)에 둔다 — 큐와 동일 관용구.
+			// 멤버에 붙이면 지역 스냅샷(TopNODE bTopNode)까지 물려받아 레지스터에 못 올라가고
+			// 반복마다 스택을 왕복한다. 공유 접근은 volatile 포인터를 거치므로 보장은 동일.
 			struct TopNODE
 			{
 				NODE* pNode;
@@ -124,7 +123,9 @@ namespace LockFree
 				return true;
 			}
 
-			// 아직 Free되지 않은(사용 중) 노드는 free list에 없으므로 회수되지 않고 누수된다.
+			// 아직 Free되지 않은(사용 중) 노드는 free list에 없어 아래 루프가 못 본다.
+			// 메모리 자체는 HeapDestroy가 힙을 통째로 반환하므로 새지 않고, 빠지는 것은
+			// 그 노드들의 T 소멸자 호출이다. 즉 메모리 누수가 아니라 소멸자 미호출이다.
 			~CInternalFreeList()
 			{
 				if (this->_Initialized == false)
@@ -247,7 +248,10 @@ namespace LockFree
 
 					_mm_prefetch((const char*)bTopNode.pNode, _MM_HINT_T0);
 
-					//CAS를 덜 호출하기위함
+					// 태그 재확인: 스냅샷이 찢겼으면 DCAS를 안 쏘고 재시도. 정확성은 아래 DCAS의
+					// 태그 비교가 책임진다. "CAS를 덜 호출해 빨라진다"는 근거는 실측으로 반증됐다
+					// — 이 검사를 빼는 쪽이 오히려 3.5% 빨랐다. 경합이 없으면 아낄 CAS가 없고,
+					// 있으면 어차피 DCAS가 실패하기 때문. 의도를 드러내는 조기 탈출로만 남긴다.
 					if (bTopNode.UniqueCount != this->_pTopNode->UniqueCount)
 						continue;
 
