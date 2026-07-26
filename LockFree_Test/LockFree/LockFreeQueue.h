@@ -410,7 +410,11 @@ public:
 
 			_mm_prefetch((const char*)bHeadNextNode, _MM_HINT_T0);
 
-			*pOutData = bHeadNextNode->Data;
+			// 복사는 DCAS 승리 전에 해야 한다(승리 후엔 이 노드가 새 더미가 되어
+			// 다른 스레드가 곧바로 Dequeue·Free·재활용할 수 있음). 다만 곧장 *pOutData에
+			// 쓰면, DCAS 실패 → 재시도 → 빈 큐로 false를 반환하는 경로에서 호출자 버퍼가
+			// 이미 오염된 채 남는다. 지역 임시에 담아두고 승리한 뒤에만 넘긴다.
+			T copied = bHeadNextNode->Data;
 
 			// 태그 = 관측값+1 (지역) — Enqueue tail 태그와 동일 원리
 			if (false == InterlockedCompareExchange128
@@ -427,7 +431,8 @@ public:
 			}
 			else
 			{
-				// DCAS 성공
+				// DCAS 성공 — 이 시점부터 노드 소유가 확정되므로 호출자에게 넘긴다
+				*pOutData = copied;
 				break;
 			}
 			//____________________________________________________________________
