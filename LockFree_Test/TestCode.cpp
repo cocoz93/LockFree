@@ -2072,11 +2072,29 @@ void RunConservationTest(const char* name, int threadCount,
     std::atomic<uint64_t> falseEmpty(0);
     std::atomic<bool> stop(false);
 
+    // 스레드별 진행 카운터 (+정상 종료 표시). 워치독 판정용.
+    //   합산 카운터 하나로는 "한 스레드만 영구 정지"를 못 잡는다 — 나머지가 계속
+    //   카운터를 올려 전체는 진행 중으로 보이고, join()에서 조용히 굳는다
+    //   (실증: 스레드 0만 멈춘 뮤턴트가 95초간 무증상). done은 "정상 종료라 카운터가
+    //   멈춘 것"과 "정지"를 구분해, join 구간까지 감시가 이어지게 한다.
+    struct alignas(64) ThreadProg
+    {
+        std::atomic<uint64_t> ops{ 0 };
+        std::atomic<bool>     done{ false };
+    };
+    auto prog = std::make_unique<ThreadProg[]>(threadCount);
+
+    // 드레인(전량 회수) 구간 감시용 — tryTake가 내부에서 무한 재시도로 굳는 경우까지
+    // 잡으려면 루프 밖(별도 스레드)에서 진행을 봐야 한다.
+    std::atomic<uint64_t> drainCnt(0);
+    std::atomic<bool>     drainStarted(false);
+    std::atomic<bool>     allDone(false);
+
     // 2) 꺼내면 즉시 되넣기 (꺼낸 뒤에는 stop 여부와 무관하게 반드시 되넣어 보존 유지)
     std::vector<std::thread> threads;
     for (int t = 0; t < threadCount; t++)
     {
-        threads.emplace_back([&]() {
+        threads.emplace_back([&, t]() {
             TestPayload p;
             while (!stop.load(std::memory_order_relaxed))
             {
@@ -2091,39 +2109,85 @@ void RunConservationTest(const char* name, int threadCount,
                     falseEmpty.fetch_add(1, std::memory_order_relaxed);
                 }
                 ops.fetch_add(1, std::memory_order_relaxed);
+                prog[t].ops.fetch_add(1, std::memory_order_relaxed);
             }
+            prog[t].done.store(true, std::memory_order_release);
             });
     }
 
-    // 3) 워치독: 진행 카운터가 일정 시간 멈추면 HANG 판정 (조용한 멈춤 → 명시적 FAIL)
-    auto startTime = std::chrono::steady_clock::now();
-    uint64_t lastOps = 0;
-    int stallTicks = 0;
+    // 3) 워치독 스레드: 본 구간은 "스레드별" 진행을, 드레인 구간은 회수 카운터를 감시.
+    //    어느 한 스레드라도 HANG_SECONDS 동안 진행 0이면(정상 종료 제외) 명시적 FAIL.
     const int HANG_TICKS = TestConfig::CONSERVATION_HANG_SECONDS * 2;   // 500ms 단위
+    std::thread watchdog([&]() {
+        std::vector<uint64_t> last(threadCount, 0);
+        std::vector<int>      stall(threadCount, 0);
+        uint64_t lastDrain = 0;
+        int      drainStall = 0;
 
+        while (!allDone.load(std::memory_order_relaxed))
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            if (allDone.load(std::memory_order_relaxed))
+                break;
+
+            if (!drainStarted.load(std::memory_order_relaxed))
+            {
+                for (int i = 0; i < threadCount; i++)
+                {
+                    if (prog[i].done.load(std::memory_order_relaxed))
+                    {
+                        stall[i] = 0;
+                        continue;
+                    }
+                    uint64_t cur = prog[i].ops.load(std::memory_order_relaxed);
+                    if (cur == last[i])
+                    {
+                        if (++stall[i] >= HANG_TICKS)
+                        {
+                            std::cout << "\n[CRASH] " << name << " Conservation HANG: 스레드 " << i
+                                << " 이(가) " << TestConfig::CONSERVATION_HANG_SECONDS
+                                << "초간 진행 없음 (해당 스레드 ops=" << cur
+                                << ", 전체 ops=" << ops.load()
+                                << ", falseEmpty=" << falseEmpty.load() << ")" << std::endl;
+                            Crash();
+                        }
+                    }
+                    else
+                        stall[i] = 0;
+                    last[i] = cur;
+                }
+            }
+            else
+            {
+                uint64_t cur = drainCnt.load(std::memory_order_relaxed);
+                if (cur == lastDrain)
+                {
+                    if (++drainStall >= HANG_TICKS)
+                    {
+                        std::cout << "\n[CRASH] " << name << " Conservation 드레인 정지: "
+                            << TestConfig::CONSERVATION_HANG_SECONDS
+                            << "초간 회수 진행 없음 (회수=" << cur << ")" << std::endl;
+                        Crash();
+                    }
+                }
+                else
+                    drainStall = 0;
+                lastDrain = cur;
+            }
+        }
+        });
+
+    // 본 구간: 시간 예산만큼 실행 (정지 감시는 위 워치독 스레드가 전담)
+    auto startTime = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - startTime
         < std::chrono::seconds(TestConfig::CONSERVATION_SECONDS))
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-        uint64_t cur = ops.load();
-        if (cur == lastOps)
-        {
-            if (++stallTicks >= HANG_TICKS)
-            {
-                std::cout << "\n[CRASH] " << name << " Conservation HANG: "
-                    << TestConfig::CONSERVATION_HANG_SECONDS << "초간 진행 없음 (ops="
-                    << cur << ", falseEmpty=" << falseEmpty.load() << ")" << std::endl;
-                Crash();
-            }
-        }
-        else
-            stallTicks = 0;
-        lastOps = cur;
     }
 
     stop = true;
     for (auto& t : threads) t.join();
+    drainStarted.store(true, std::memory_order_release);
 
     // 4) 전량 회수 → 보존 검증 (개수·합계 대조. 진단을 위해 판정 전에 수치 출력)
     TestPayload p;
@@ -2134,8 +2198,11 @@ void RunConservationTest(const char* name, int threadCount,
         TEST_ASSERT(p.Verify(), "Conservation 회수 페이로드 손상");
         cnt++;
         sum += p.sequence;
+        drainCnt.fetch_add(1, std::memory_order_relaxed);
         TEST_ASSERT(cnt <= PREFILL, "Conservation 회수 개수 초과 (노드 중복/순환 의심)");
     }
+    allDone.store(true, std::memory_order_release);
+    watchdog.join();
 
     uint64_t fe = falseEmpty.load();
     std::cout << "  > 총 op: " << ops.load()
@@ -2344,6 +2411,12 @@ static bool RunQueuePerProducerFIFO(int producerCount, int outstandingCap, int d
 
     uint64_t producedTotal = 0;
     for (int p = 0; p < producerCount; ++p) producedTotal += produced[p];
+    if (producedTotal == 0)
+    {
+        // "0건 생산 → 0건 소비 → 개수 보존"은 검증이 아니라 무위다. 초록불 금지.
+        std::cout << "  > ★생산 0건: 아무것도 검증하지 못함 (인자/환경 이상)" << std::endl;
+        return true;
+    }
     bool conserved = (totalDeq.load() == producedTotal);
     std::cout << "  > 위반 미검출. dequeued=" << totalDeq.load()
               << " / produced=" << producedTotal
@@ -2455,13 +2528,13 @@ static bool RunFreeListStress(int threadCount, int durationSeconds)
         return true;
     }
 
-    // 보존 검사: alloc==free, 전량 반환
+    // 보존 검사: alloc==free, 전량 반환. alloc 0건이면 검증 자체가 무위 → 실패 처리.
     uint64_t a = allocs.load(), f = frees.load();
     INT64 ac = pool.GetAllocCount(), fl = pool.GetFreeListSize();
-    bool ok = (a == f) && (ac == fl);
+    bool ok = (a > 0) && (a == f) && (ac == fl);
     std::cout << "  > alloc=" << a << ", free=" << f
               << ", AllocCount=" << ac << ", FreeListSize=" << fl
-              << (ok ? "  (보존 OK)" : "  ★불일치(유실/누수)!") << std::endl;
+              << (ok ? "  (보존 OK)" : "  ★불일치(유실/누수) 또는 작업량 0!") << std::endl;
     return !ok;
 }
 
@@ -2647,11 +2720,28 @@ static bool RunExternalTlsStress(int producerCount, int consumerCount, int durat
         return true;
     }
 
+    // [청크 잔류 판정] 관찰만 하던 값을 예산 초과 시 위반으로 승격.
+    //   정상 종료 시 잔류는 "종료한 생산자 스레드가 TLS에 쥔 채 나간 청크(=생산자 수)" 근처다
+    //   (실측: 생산4/소비4에서 4). FreeCount 감소가 오염되면(비원자 등) 반납이 영영 안 일어나
+    //   수백 개가 남는다(고장 재현: 361~588). 그런데 기존엔 숫자만 찍고 exit 0이었다.
+    //   판정값은 델타가 아니라 "종료 시 사용중"이다 — 델타는 피크 후 하락하면 음수가 되어
+    //   고장 상태를 '정상'으로 오판한 사례가 있다.
+    {
+        const INT64 endInUse = pool.GetChunkAllocCount() - pool.GetChunkIdleCount();
+        const INT64 budget   = (INT64)(producerCount + consumerCount) * 2 + 8;
+        if (endInUse > budget)
+        {
+            std::cout << "\n[REPRO] *** 청크 회수 실패: 종료 시 사용중=" << endInUse
+                      << " (예산 " << budget << " 초과): FreeCount/반납 경로 오염 의심" << std::endl;
+            return true;
+        }
+    }
+
     uint64_t a = allocs.load(), f = frees.load();
     size_t outLeft = outstanding.size();
-    bool ok = (a == f) && (outLeft == 0);
+    bool ok = (a > 0) && (a == f) && (outLeft == 0);
     std::cout << "  > alloc=" << a << ", free=" << f << ", 종료 후 나가 있는 슬롯=" << outLeft
-              << (ok ? "  (보존 OK)" : "  ★불일치!") << std::endl;
+              << (ok ? "  (보존 OK)" : "  ★불일치 또는 작업량 0!") << std::endl;
     return !ok;
 }
 
@@ -2718,6 +2808,107 @@ static bool RunExternalTlsLeakDiag(int rounds, int threadsPerRound, int allocsPe
 
 
 //=============================================================================
+// Queue 헤드리스: Dequeue가 false를 반환할 때 출력 버퍼가 보존되는지  [438eb4e 회귀]
+//
+// 계약: Dequeue(pOut)가 false면 *pOut은 건드리지 않은 상태여야 한다.
+//   (수정 전 결함: 복사 → DCAS 패배 → 재시도 → 빈 큐 false 경로에서 호출자 버퍼가
+//    남이 가져간 값으로 덮인 채 반환. T가 포인터면 댕글링 값이 밖으로 샌다)
+//
+// 재현 설계가 핵심이다:
+//   - 생산자 1이 큐 깊이를 얕게(<=4) 유지하고 소비자 N이 다투면
+//     "복사까지 해놓고 DCAS 패배 → 재시도 → 빈 큐 false" 경로가 초당 수백만 회 강제된다.
+//   - 소비자는 호출 전 버퍼에 POISON을 넣고, false로 돌아왔는데 POISON이 아니면 결함 입증.
+//   - 대칭 설계(스레드마다 enq 1 → deq 1)는 큐가 빌 틈이 없어 false가 0회 = 이 경로를
+//     아예 못 밟는다. 그래서 반드시 생산/소비를 비대칭으로 가른다.
+//
+// 반환: 0=무결(경로 충분히 밟음), 1=false 반환 0회(테스트 무효), 2=오염 검출(결함)
+//=============================================================================
+static int RunQueueFalseReturnBufferTest(int consumerCount, int secs)
+{
+    std::cout << "\n[Queue qbuf] Dequeue false 시 출력버퍼 보존: 소비자 " << consumerCount
+              << ", " << secs << "초" << std::endl;
+
+    LockFree::CLockFreeQueue<uint64_t> queue;
+    const uint64_t POISON    = 0xFEEDFACEDEADBEEFULL;
+    const int      DEPTH_CAP = 4;      // 얕게 유지해 '빔<->몇 개' 진동을 만든다
+
+    std::atomic<bool>     stop(false), polluted(false);
+    std::atomic<int64_t>  outstanding(0);
+    std::atomic<uint64_t> falseReturns(0), popped(0);
+    uint64_t vSeen = 0;                // 오염 시 관측값 (첫 검출자만 기록, join 후 읽음)
+
+    std::thread producer([&]() {
+        uint64_t seq = 1;
+        while (!stop.load(std::memory_order_relaxed))
+        {
+            if (outstanding.load(std::memory_order_relaxed) < DEPTH_CAP)
+            {
+                if (queue.Enqueue(seq)) { outstanding.fetch_add(1, std::memory_order_relaxed); ++seq; }
+            }
+            else
+                YieldProcessor();
+        }
+    });
+
+    std::vector<std::thread> consumers;
+    for (int t = 0; t < consumerCount; ++t)
+    {
+        consumers.emplace_back([&]() {
+            uint64_t v;
+            while (!stop.load(std::memory_order_relaxed))
+            {
+                v = POISON;
+                if (queue.Dequeue(&v))
+                {
+                    outstanding.fetch_sub(1, std::memory_order_relaxed);
+                    popped.fetch_add(1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    falseReturns.fetch_add(1, std::memory_order_relaxed);
+                    if (v != POISON)               // false인데 버퍼가 덮임 = 계약 위반
+                    {
+                        if (!polluted.exchange(true)) vSeen = v;
+                        stop = true;
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    auto start = std::chrono::steady_clock::now();
+    while (!stop.load() &&
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(secs))
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        std::cout << "  .. 경과 "
+                  << std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::steady_clock::now() - start).count()
+                  << "초, pop=" << popped.load()
+                  << ", false반환=" << falseReturns.load() << std::endl;
+    }
+    stop = true;
+    producer.join();
+    for (auto& t : consumers) t.join();
+
+    if (polluted.load())
+    {
+        std::cout << "\n[REPRO] *** Dequeue가 false를 반환하며 호출자 버퍼를 덮어씀 (관측값="
+                  << vSeen << ")" << std::endl;
+        return 2;
+    }
+    if (falseReturns.load() == 0)
+    {
+        std::cout << "  > false 반환이 0회: 검증 경로를 못 밟음 (테스트 무효)" << std::endl;
+        return 1;
+    }
+    std::cout << "  > false 반환 " << falseReturns.load() << "회 전부 버퍼 보존 (오염 0)" << std::endl;
+    return 0;
+}
+
+
+//=============================================================================
 // 메뉴 출력
 //=============================================================================
 void PrintMenu()
@@ -2748,15 +2939,27 @@ int main(int argc, char** argv)
 
     // Headless 진입: 인자가 있으면 해당 테스트만 실행하고 종료 (메뉴/cls 없이 선형 출력)
     //   예) TestCode.exe repro [producers] [outstandingCap] [seconds]
-    //   종료코드: 0=위반 미검출, 2=결함 재현, 1=인자 오류
+    //   종료코드: 0=위반 미검출, 2=결함 재현, 1=인자 오류/테스트 무효
+    //
+    // [인자 하한 검증] atoi 실패·0·음수는 "아무 일도 안 하고 초록불"이 된다 —
+    //   실측: repro 8 0 5는 cap=0이라 생산자가 1건도 못 넣고 '개수 보존 OK'로 exit 0,
+    //   fl 0 / tls 0 0 / tlsleak 0 0 0 도 작업량 0으로 통과. 전부 여기서 차단한다.
     if (argc >= 2)
     {
         std::string mode = argv[1];
+        auto argInt = [&](int idx, int def) { return (argc > idx) ? std::atoi(argv[idx]) : def; };
+        auto badArgs = [&](const char* usage) {
+            std::cout << "인자 오류: " << usage << " (모든 값은 1 이상)" << std::endl;
+            return 1;
+        };
+
         if (mode == "repro")
         {
-            int producers = (argc >= 3) ? std::atoi(argv[2]) : 8;
-            int cap       = (argc >= 4) ? std::atoi(argv[3]) : 64;
-            int secs      = (argc >= 5) ? std::atoi(argv[4]) : 60;
+            int producers = argInt(2, 8);
+            int cap       = argInt(3, 64);
+            int secs      = argInt(4, 60);
+            if (producers < 1 || cap < 1 || secs < 1)
+                return badArgs("repro [producers>=1] [outstandingCap>=1] [seconds>=1]");
             bool r = RunQueuePerProducerFIFO(producers, cap, secs);
             std::cout << "\n[EXIT] repro " << (r ? "= 위반 검출(결함 재현)" : "= 위반 미검출") << std::endl;
             return r ? 2 : 0;
@@ -2773,8 +2976,10 @@ int main(int argc, char** argv)
         if (mode == "fl")
         {
             // 프리리스트 직접 스트레스(이중 배부·유실). 종료코드 0=무결, 2=위반.
-            int threads = (argc >= 3) ? std::atoi(argv[2]) : 8;
-            int secs    = (argc >= 4) ? std::atoi(argv[3]) : 30;
+            int threads = argInt(2, 8);
+            int secs    = argInt(3, 30);
+            if (threads < 1 || secs < 1)
+                return badArgs("fl [threads>=1] [seconds>=1]");
             bool r = RunFreeListStress(threads, secs);
             std::cout << "\n[EXIT] fl " << (r ? "= 위반 검출(결함)" : "= 위반 미검출") << std::endl;
             return r ? 2 : 0;
@@ -2782,22 +2987,39 @@ int main(int argc, char** argv)
         if (mode == "tls")
         {
             // ExternalTls 크로스스레드 정합성. 종료코드 0=무결, 2=위반.
-            int prod = (argc >= 3) ? std::atoi(argv[2]) : 4;
-            int cons = (argc >= 4) ? std::atoi(argv[3]) : 4;
-            int secs = (argc >= 5) ? std::atoi(argv[4]) : 30;
+            int prod = argInt(2, 4);
+            int cons = argInt(3, 4);
+            int secs = argInt(4, 30);
+            if (prod < 1 || cons < 1 || secs < 1)
+                return badArgs("tls [producers>=1] [consumers>=1] [seconds>=1]");
             bool r = RunExternalTlsStress(prod, cons, secs);
             std::cout << "\n[EXIT] tls " << (r ? "= 위반 검출(결함)" : "= 위반 미검출") << std::endl;
             return r ? 2 : 0;
         }
         if (mode == "tlsleak")
         {
-            // ExternalTls 스레드 종료 누수 진단(관찰용). 알려진 한계라 항상 종료코드 0.
-            int rounds = (argc >= 3) ? std::atoi(argv[2]) : 20;
-            int tpr    = (argc >= 4) ? std::atoi(argv[3]) : 4;
-            int apt    = (argc >= 5) ? std::atoi(argv[4]) : 5;
+            // ExternalTls 스레드 종료 누수 진단(관찰용). 알려진 한계라 정상 실행은 항상 0.
+            int rounds = argInt(2, 20);
+            int tpr    = argInt(3, 4);
+            int apt    = argInt(4, 5);
+            if (rounds < 1 || tpr < 1 || apt < 1)
+                return badArgs("tlsleak [rounds>=1] [threadsPerRound>=1] [allocsPerThread>=1]");
             bool leaked = RunExternalTlsLeakDiag(rounds, tpr, apt);
             std::cout << "\n[EXIT] tlsleak = " << (leaked ? "누수 확인(알려진 한계)" : "누수 신호 없음") << std::endl;
             return 0;
+        }
+        if (mode == "qbuf")
+        {
+            // Dequeue false 반환 시 출력버퍼 보존(438eb4e 회귀). 0=무결, 1=무효, 2=오염.
+            int consumers = argInt(2, 8);
+            int secs      = argInt(3, 10);
+            if (consumers < 2 || secs < 1)
+                return badArgs("qbuf [consumers>=2] [seconds>=1]");
+            int r = RunQueueFalseReturnBufferTest(consumers, secs);
+            std::cout << "\n[EXIT] qbuf " << (r == 0 ? "= 무결(버퍼 보존)"
+                                            : r == 1 ? "= 테스트 무효(false 0회)"
+                                                     : "= 오염 검출(결함)") << std::endl;
+            return r;
         }
         std::cout << "알 수 없는 모드: " << mode << std::endl;
         return 1;

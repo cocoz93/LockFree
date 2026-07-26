@@ -321,6 +321,10 @@ public:
 			//_______________________________________________________________________________________
 			else
 			{
+				// [증폭 F] 재검증 통과 ~ 링크 DCAS 사이 잔여 창. 이 사이 스냅샷 tail 노드가
+				// Free→재활용되면 counted-next(Tag 비교)가 마지막 방어선이다(위 (3)).
+				// 이 훅이 없으면 이 창이 수 ns라, (3)을 무력화한 회귀를 증폭 빌드가 못 잡는다.
+				LF_RACE_HOOK_ENQ();
 				NextRef expected;
 				expected.pNode = nullptr;			// low  = 관측한 null
 				expected.Tag   = bTailNextTag;		// high = 관측한 태그
