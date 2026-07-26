@@ -25,10 +25,14 @@ class CLockFreeStack
 		T		Data;
 	};
 
+	// volatile은 멤버가 아니라 "포인터"(_pTopNode)에 둔다 — 큐(TopNODE)와 동일 관용구.
+	// 멤버에 붙이면 지역 스냅샷(TopNODE bTopNode)까지 volatile을 물려받아 레지스터에
+	// 못 올라가고 반복마다 스택을 왕복한다(실측 싱글스레드 Pop -9%).
+	// 공유 인스턴스 접근은 volatile 포인터를 거치므로 보장은 동일하다.
 	struct TopNODE
 	{
-		NODE* volatile	pNode;
-		volatile INT64	UniqueCount;
+		NODE*	pNode;
+		INT64	UniqueCount;
 	};
 
 	// Intel oneTBB atomic_backoff 방식: Spin(pause 지수증가) → Yield(SwitchToThread)
@@ -270,7 +274,7 @@ public:
 
 private:
 	CInternalFreeList<NODE>*	_pFreeList;
-	TopNODE*			_pTopNode;
+	volatile TopNODE*	_pTopNode;
 	bool				_Initialized;
 	alignas(64) volatile INT64 _UseSize;
 };
