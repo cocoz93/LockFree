@@ -2572,22 +2572,73 @@ static bool RunExternalTlsStress(int producerCount, int consumerCount, int durat
         });
     }
 
+    // [청크 잔류(retention) 관찰]
+    // GetChunkAllocCount()는 HeapAlloc으로 새 청크를 뽑은 누계(단조증가)다. 정상상태에서 이 값이
+    // 더 안 오르면(plateau) 청크가 재활용된다는 뜻 = 부분 반납 슬롯이 청크를 묶어두지 않음.
+    // 계속 오르면 잔류가 쌓인다는 신호.
+    // 단 초반 상승은 정상이다: 나가 있는 슬롯이 백프레셔 상한(HANDOFF_CAP)까지 차오르는 동안은
+    // 그만큼 청크가 실제로 필요하다. 그래서 전반은 버리고 후반 구간 증가량만으로 판단한다.
+    // 판정의 핵심은 누계가 아니라 "사용중"이다. 누계(HeapAlloc 총수)는 회수·재사용되면 더 안 오르므로
+    // 멈춰 있어도 잔류가 고수위에 머무는 건지 구분이 안 된다. 반면
+    //   사용중 = 누계 - 유휴(내부 프리리스트 보유분)
+    // 은 지금 스레드들이 붙잡고 있는 청크 수라, 이게 안정되면 회수가 도는 것이고 계속 늘면 잔류다.
+    const INT64 startChunks = pool.GetChunkAllocCount();
+    const int   midSec      = durationSeconds / 2;   // 관찰 구간 시작점
+    INT64       midChunks   = -1;
+    INT64       midInUse    = -1;
+    INT64       maxInUse    = 0;
+
     auto start = std::chrono::steady_clock::now();
     while (!stop.load() &&
            std::chrono::steady_clock::now() - start < std::chrono::seconds(durationSeconds))
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-        std::cout << "  .. 경과 "
-                  << std::chrono::duration_cast<std::chrono::seconds>(
-                         std::chrono::steady_clock::now() - start).count()
+
+        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                 std::chrono::steady_clock::now() - start).count();
+        const INT64 chunks = pool.GetChunkAllocCount();
+        const INT64 inUse  = chunks - pool.GetChunkIdleCount();   // 지금 붙잡고 있는 청크 수
+        if (inUse > maxInUse)
+            maxInUse = inUse;
+        if (midChunks < 0 && elapsed >= midSec)
+        {
+            midChunks = chunks;
+            midInUse  = inUse;
+        }
+
+        std::cout << "  .. 경과 " << elapsed
                   << "초, alloc=" << allocs.load() << ", free=" << frees.load()
-                  << ", 나가있음=" << handoffSize.load() << std::endl;
+                  << ", 나가있음=" << handoffSize.load()
+                  << ", 청크누계=" << chunks << ", 청크사용중=" << inUse << std::endl;
     }
     stop = true;
 
     for (auto& t : producers) t.join();
     producersDone = true;                 // 이제 소비자는 남은 것 드레인 후 종료
     for (auto& t : consumers) t.join();
+
+    // [청크 잔류 관찰 결과] 결함 판정이 아니라 관찰이므로 반환값(종료코드)에는 영향을 주지 않는다.
+    {
+        const INT64 endChunks = pool.GetChunkAllocCount();
+        const INT64 endInUse  = endChunks - pool.GetChunkIdleCount();
+        if (midChunks < 0)                // 관찰 구간에 못 닿을 만큼 짧게 돈 경우
+        {
+            midChunks = startChunks;
+            midInUse  = endInUse;
+        }
+
+        std::cout << "  > 청크 누계(HeapAlloc): 시작=" << startChunks
+                  << ", " << midSec << "초=" << midChunks
+                  << ", 종료=" << endChunks
+                  << "  | 후반 증가=" << (endChunks - midChunks) << std::endl;
+        std::cout << "  > 청크 사용중(잔류): " << midSec << "초=" << midInUse
+                  << ", 종료=" << endInUse << ", 관측 최대=" << maxInUse
+                  << "  | 후반 증가=" << (endInUse - midInUse) << std::endl;
+        std::cout << ((endInUse - midInUse) <= 0
+            ? "  > 후반에 잔류가 늘지 않음 = 청크 회수가 정상적으로 돌고 있음"
+            : "  > 후반에도 잔류 증가 → 부분 반납 슬롯이 청크를 묶어두는 중일 수 있음(더 길게 관찰)")
+                  << std::endl;
+    }
 
     if (bug.load())
     {

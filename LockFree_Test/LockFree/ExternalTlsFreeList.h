@@ -77,8 +77,14 @@ public:
 		// 이 청크를 소유한 CExternalTlsFreeList(this) 신원. Free에서 크로스풀 오용 fail-fast용.
 		// (Config/DataConfig 자기일관성은 전역 g_Config 기반이라 남의 풀을 못 걸러 → 인스턴스 신원으로 보강)
 		LONG64 OwnerPoolId;
-											
+
 	};
+
+	// 청크 자체를 담아두는 내부 프리리스트.
+	// 세 번째 인자(UseApproxSize)를 켜서 "지금 유휴로 들어 있는 청크 수"를 조회 가능하게 한다.
+	// 청크 단위 Alloc/Free는 슬롯 대비 극히 드물어(청크 하나가 CHUNK_SIZE개 슬롯을 덮는다)
+	// 카운터 원자연산 비용은 사실상 0이고, 대신 청크 잔류량을 상시 관측할 수 있다.
+	using ChunkPool = CInternalFreeList<ChunkNODE, false, true>;
 
 
 public:
@@ -113,7 +119,7 @@ public:
 		if (this->_Initialized)
 			return true;
 
-		this->_ChunkFreeList = new CInternalFreeList<ChunkNODE>;
+		this->_ChunkFreeList = new ChunkPool;
 		if (this->_ChunkFreeList == nullptr)
 			return false;
 
@@ -228,8 +234,14 @@ public:
 	// 못하고 종료하면 그 청크는 회수·재사용되지 못하므로, 그런 상황이 쌓이면 이 값이 계속 증가한다.
 	INT64 GetChunkAllocCount() const { return _ChunkFreeList->GetAllocCount(); }
 
+	// 진단/모니터링용: 지금 내부 프리리스트에 유휴로 들어 있는(회수 끝난) 청크 수.
+	// GetChunkAllocCount() - GetChunkIdleCount() = 지금 스레드들이 붙잡고 있는 청크 수(잔류량).
+	// 이 잔류량이 스레드 수 근처에서 안정되면 청크가 정상 회수되는 것이고,
+	// 계속 늘어나면 부분 반납 슬롯이 청크를 묶어두고 있다는 뜻이다.
+	INT64 GetChunkIdleCount() const { return _ChunkFreeList->GetFreeListSize(); }
+
 private:
-	CInternalFreeList<ChunkNODE>* _ChunkFreeList;
+	ChunkPool* _ChunkFreeList;
 
 private:
 	int TlsIndex;
