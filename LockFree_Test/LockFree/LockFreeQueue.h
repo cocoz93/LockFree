@@ -43,10 +43,15 @@ class CLockFreeQueue
 	// 노드가 재활용될 때마다(Enqueue 재사용 초기화) Tag가 단조 증가하므로, 낡은
 	// (null, 옛태그) 스냅샷을 든 Enqueue의 링크 DCAS는 반드시 실패한다 → null-ABA(Q-E1) 차단.
 	// cmpxchg16b 요건: &NODE::Next가 16바이트 정렬이어야 함(아래 alignas(16)로 보장).
+	//
+	// 두 필드는 여러 스레드가 동시에 읽고 쓰는 공유 상태라 volatile로 선언한다(TopNODE와 동일).
+	// 이 파일은 Next를 128비트 원자 로드로 읽지 않고 두 필드를 따로 읽으므로, "태그를 값보다
+	// 먼저" 라는 접근 순서 자체가 정확성의 전제다. 평문이면 컴파일러가 그 순서를 뒤집을 수
+	// 있다(MSVC /O2가 실제로 재배치하는 것을 확인했다).
 	struct NextRef
 	{
-		NODE* pNode;   // low  64
-		INT64 Tag;     // high 64
+		NODE* volatile pNode;   // low  64
+		volatile INT64 Tag;     // high 64
 	};
 
 	struct NODE
@@ -234,13 +239,19 @@ public:
 			return false;
 
 		pnNode->Data = Data;
-		// 재사용 초기화: next=null, Tag는 이전 값 +1로 단조 증가시켜 낡은 링크 스냅샷을 무효화.
-		// (pnNode는 아직 private. Tag는 최초 alloc 시 멤버 초기자 0, 재사용마다 여기서 +1.
-		//  이 노드에 대한 stale DCAS는 Tag가 이미 앞서 있어 모두 실패하므로 이 평문 쓰기는 안전)
-		pnNode->Next.pNode = nullptr;
+		// 재사용 초기화. 순서가 정확성의 일부다 — Tag를 "먼저" 올려 낡은 링크 스냅샷을
+		// 무효화한 뒤 next를 비운다. 반대로 하면 {null, 옛Tag}라는 과도상태가 잠깐 노출되고,
+		// 그 조합을 스냅샷한 낡은 Enqueue의 링크 DCAS가 아직 큐에 들어가지도 않은 이 사설
+		// 노드에 성공한다(Enqueue는 true를 반환하는데 원소는 큐에서 도달 불가).
+		// 위 순서에서 나오는 과도상태는 {옛next, 새Tag}인데, 낡은 DCAS의 expected는 항상
+		// pNode==null이라 절대 일치하지 않는다. (Tag가 volatile이라 순서가 뒤집히지 않는다)
 		pnNode->Next.Tag  += 1;
+		// [증폭 C] 두 store 사이 — 위에서 말한 과도상태 창이 열리는 자리.
+		// 순서가 올바르면 여기서 아무리 오래 멈춰도 낡은 DCAS가 걸릴 조합이 없어야 한다.
+		LF_RACE_HOOK_ENQ();
+		pnNode->Next.pNode = nullptr;
 
-		// [증폭 C] 새 노드가 next=null인 private 상태로 머무는 창을 넓힌다.
+		// [증폭 C2] 새 노드가 next=null인 private 상태로 머무는 창을 넓힌다.
 		// 이 노드가 직전에 Free→재활용된 tail 노드라면 낡은 스냅샷을 든 Enqueue가 노릴 수 있는
 		// 구간 — 이제 아래 재검증+counted-next가 방어하므로, 이 훅은 그 방어를 스트레스한다(Q-E1).
 		LF_RACE_HOOK_ENQ();
@@ -265,15 +276,23 @@ public:
 			// 재활용을 제대로 걸러내는지 스트레스한다. (수정 전 null-ABA가 터지던 바로 그 창 — Q-E1)
 			LF_RACE_HOOK_ENQ();
 
-			//tail의 Next백업 (pNode + Tag 스냅샷)
-			pbTailNextNode = bTopTailNode.pNode->Next.pNode;
+			//tail의 Next백업 — 태그를 "먼저" 읽는다(128비트 원자 로드를 안 쓰는 대신).
+			// Tag가 [여기 ~ 아래 링크 DCAS] 내내 불변이면 그 사이 링크도 재활용도 없었다는
+			// 뜻이므로(둘 다 Tag를 올린다), 뒤이어 읽은 next가 그 태그의 짝임이 보장된다.
+			// 순서를 뒤집으면 (옛 pNode=null, 새 Tag)라는 실존한 적 없는 조합이 만들어지고,
+			// 그게 재활용 노드의 상태와 우연히 일치하면 링크 DCAS가 잘못 성공한다.
 			INT64 bTailNextTag = bTopTailNode.pNode->Next.Tag;
+			// [증폭 E] 두 로드 사이 — 이 사이 다른 스레드가 링크를 걸어도 위 논리가 성립해야 한다.
+			LF_RACE_HOOK_ENQ();
+			pbTailNextNode     = bTopTailNode.pNode->Next.pNode;
 
 			// [Q-E1 수정 핵심] next를 읽은 뒤 tail 스냅샷 재검증 (MS 원본의 tail==Q.tail).
 			// 스냅샷 tail 노드가 그새 Dequeue·Free·재활용됐다면 tail 태그(UniqueCount)가 이미
 			// 바뀌어 여기서 걸러진다(낡은 tail 노드 감지). 이 재검증만으로는 재검증~CAS 사이
 			// 잔여 창이 남지만, 아래 링크가 counted-next DCAS라 그 창의 재활용도 next Tag로
-			// 감지된다 → 둘이 함께 null-ABA(Q-E1)를 완전히 닫는다.
+			// 감지된다. 즉 null-ABA(Q-E1)는 세 가지가 함께 닫는다 —
+			//   (1) 재사용 초기화의 Tag 선행  (2) 여기 tail 재검증  (3) counted-next DCAS.
+			// 셋 중 하나라도 빠지면 뚫린다.
 			if (bTopTailNode.UniqueCount != this->_ptail->UniqueCount)
 				continue;
 
