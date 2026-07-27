@@ -223,7 +223,7 @@ public:
 		if constexpr (UseApproxSize)
 			return (_UseSize == 0);
 
-		if (_Initialized == false || _phead == nullptr)
+		if (_Initialized == false)		// 초기화됐다면 _phead는 반드시 non-null (Init 실패 경로가 되돌려 놓는다)
 			return true;
 
 		return (_phead->pNode->Next.pNode == nullptr);
@@ -278,8 +278,6 @@ public:
 			// 성능 이득도 측정 한계 아래다(옛 주석의 "20-40 cycles 절감"은 실측으로 반증됨).
 			if (bTopTailNode.UniqueCount != this->_ptail->UniqueCount)
 				continue;
-
-			_mm_prefetch((const char*)bTopTailNode.pNode, _MM_HINT_T0);
 
 			// [증폭 D] tail 스냅샷 ~ next 읽기 창을 넓힌다. 이 사이 스냅샷 노드가 Dequeue로 Free·
 			// 재활용되는 상황을 강제해, 아래 "next 읽은 뒤 tail 재검증 + counted-next DCAS"가
@@ -395,8 +393,6 @@ public:
 			if (bTopHeadNode.UniqueCount != this->_phead->UniqueCount)
 				continue;
 
-			_mm_prefetch((const char*)bTopHeadNode.pNode, _MM_HINT_T0);
-
 			LF_RACE_HOOK();		// [증폭 A] head 스냅샷 ~ next 읽기 사이 창 (D2 재검증이 지키는 구간)
 
 			bHeadNextNode = bTopHeadNode.pNode->Next.pNode;
@@ -445,8 +441,6 @@ public:
 			// 
 			//	Dequeue (head != tail 확정)
 			//_______________________________________________________________________________________
-
-			_mm_prefetch((const char*)bHeadNextNode, _MM_HINT_T0);
 
 			// 복사는 DCAS 승리 전에 해야 한다(승리 후엔 이 노드가 새 더미가 되어
 			// 다른 스레드가 곧바로 Dequeue·Free·재활용할 수 있음). 다만 곧장 *pOutData에

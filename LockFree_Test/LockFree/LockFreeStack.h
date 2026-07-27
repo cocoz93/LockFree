@@ -149,39 +149,10 @@ public:
 
 		//_______________________________________________________________________________________
 		// 
-		// DCAS 버전. CAS로 가능하다면 DCAS할필요 X
-		//_______________________________________________________________________________________
-
-		/*
-		LONG64 nUniqueCount = InterlockedIncrement64((LONG64*)&this->_pTopNode->UniqueCount);
-		while (true)
-		{
-			bTopNode.UniqueCount = this->_pTopNode->UniqueCount;
-			bTopNode.pNode = this->_pTopNode->pNode;
-			nNode->pNextNode = this->_pTopNode->pNode;
-			if (false == InterlockedCompareExchange128
-			(
-				(LONG64*)this->_pTopNode,
-				(LONG64)nUniqueCount,
-				(LONG64)nNode,
-				(LONG64*)&bTopNode
-			))
-			{
-				//DCAS 실패
-				continue;
-			}
-			else
-			{
-				//DCAS 성공
-				break;
-			}
-		}*/
-		//_______________________________________________________________________________________
-
-
-		//_______________________________________________________________________________________
-		// 
-		// CAS 버전
+		// Push는 단일 워드 CAS로 충분하다 — 태그(DCAS)가 필요한 쪽은 Pop이다.
+		// 밀어 넣는 노드는 내가 방금 확보한 것이라, top이 A→B→A로 돌아와도 그 A가 진짜
+		// 현재 top이면 그 뒤에 붙이는 게 맞다(ABA가 무해). Pop은 반대로 "내가 본 A"와
+		// "지금의 A"가 같은 것인지 구분해야 해서 UniqueCount 태그를 함께 비교한다.
 		//_______________________________________________________________________________________
 		CASBackoff backoff;
 
@@ -236,8 +207,6 @@ public:
 			// 스택이 비어있으면 실패 (호출자 책임)
 			if (bTopNode.pNode == nullptr)
 				return false;
-
-			_mm_prefetch((const char*)bTopNode.pNode, _MM_HINT_T0);
 
 			// 태그 재확인: 스냅샷이 찢겼으면 DCAS를 안 쏘고 재시도. 정확성은 아래 DCAS의
 			// 태그 비교가 책임진다. 성능 이득은 측정 한계 아래였다(싱글스레드 영향 없음) —

@@ -563,7 +563,6 @@ void RunFreeListMTTest(
     std::atomic<uint64_t> totalAllocs(0);
     std::atomic<uint64_t> totalFrees(0);
     std::atomic<uint64_t> totalProgress(0);
-    std::atomic<bool> verifyFailed(false);
 
     // 진행률 출력
     std::atomic<bool> running(true);
@@ -1189,9 +1188,7 @@ void RunStackMTTest(
 
     std::random_device rd;
     std::vector<unsigned int> producerSeeds(producerCount);
-    std::vector<unsigned int> consumerSeeds(consumerCount);
     for (int i = 0; i < producerCount; i++) producerSeeds[i] = rd();
-    for (int i = 0; i < consumerCount; i++) consumerSeeds[i] = rd();
 
     std::vector<std::thread> producers;
     std::vector<std::thread> consumers;
@@ -1718,9 +1715,7 @@ void RunQueueProducerConsumerTest(
 
     std::random_device rd;
     std::vector<unsigned int> producerSeeds(producerCount);
-    std::vector<unsigned int> consumerSeeds(consumerCount);
     for (int i = 0; i < producerCount; i++) producerSeeds[i] = rd();
-    for (int i = 0; i < consumerCount; i++) consumerSeeds[i] = rd();
 
     std::vector<std::thread> producers;
     std::vector<std::thread> consumers;
@@ -1807,27 +1802,20 @@ void RunQueueProducerConsumerTest(
     TEST_ASSERT(totalDequeued == (uint64_t)TOTAL_NUMBERS, "Dequeue 개수 불일치");
     std::cout << "  > Enqueue/Dequeue 개수 일치: " << TOTAL_NUMBERS << " 개" << std::endl;
 
+    // 여기서는 누락만 센다. 중복은 소비자 쪽 compare_exchange(0→1)가 실패하는 즉시
+    // TEST_ASSERT로 잡히므로(위 "중복 Dequeue 발견"), 저장값은 0 아니면 1뿐이다.
     int missingCount = 0;
-    int duplicateCount = 0;
     for (int64_t i = 0; i < TOTAL_NUMBERS; i++)
     {
-        int status = dequeueCheck[i];
-        if (status == 0)
+        if (dequeueCheck[i] == 0)
         {
             missingCount++;
             if (missingCount <= 10)
                 std::cout << "  [ERROR] 누락된 숫자: " << i << std::endl;
         }
-        else if (status > 1)
-        {
-            duplicateCount++;
-            if (duplicateCount <= 10)
-                std::cout << "  [ERROR] 중복 처리: " << i << " (횟수: " << status << ")" << std::endl;
-        }
     }
 
     TEST_ASSERT(missingCount == 0, "누락된 숫자 " + std::to_string(missingCount) + "개 발견");
-    TEST_ASSERT(duplicateCount == 0, "중복 처리된 숫자 " + std::to_string(duplicateCount) + "개 발견");
     std::cout << "  > 모든 숫자 정확히 1번씩 처리 완료" << std::endl;
 
     TEST_ASSERT(queue.IsEmpty(), "큐가 완전히 비워지지 않음");

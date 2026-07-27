@@ -271,8 +271,6 @@ namespace LockFree
 					if (bTopNode.pNode == nullptr)
 						return AllocNewNode();
 
-					_mm_prefetch((const char*)bTopNode.pNode, _MM_HINT_T0);
-
 					// 태그 재확인: 스냅샷이 찢겼으면 DCAS를 안 쏘고 재시도. 정확성은 아래 DCAS의
 					// 태그 비교가 책임진다. "CAS를 덜 호출해 빨라진다"는 근거는 실측으로 반증됐다
 					// — 이 검사를 빼는 쪽이 오히려 3.5% 빨랐다. 경합이 없으면 아낄 CAS가 없고,
