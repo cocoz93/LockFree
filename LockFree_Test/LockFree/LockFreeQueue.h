@@ -119,10 +119,12 @@ public:
 	CLockFreeQueue(CLockFreeQueue&&) = delete;
 	CLockFreeQueue& operator=(CLockFreeQueue&&) = delete;
 
-	bool Init()
+	// initialCapacity: 노드를 미리 만들어둘 개수(프리리스트로 전달). 생성자가 이미 Init()을
+	//   부르므로, 나중에 Init(n)을 다시 부르면 초기화는 건너뛰고 n개 사전 적재만 수행한다.
+	bool Init(int initialCapacity = 0)
 	{
 		if (_Initialized)
-			return true;
+			return _pFreeList->Init(initialCapacity);
 
 		_pFreeList = new(std::nothrow) CInternalFreeList<NODE, false>();
 		if (_pFreeList == nullptr)
@@ -174,7 +176,7 @@ public:
 			_UseSize = 0;
 
 		_Initialized = true;
-		return true;
+		return _pFreeList->Init(initialCapacity);
 	}
 
 	~CLockFreeQueue()

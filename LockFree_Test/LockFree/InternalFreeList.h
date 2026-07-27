@@ -18,6 +18,15 @@
 #define LF_RACE_HOOK()
 #endif
 
+// 노드 할당 실패(HeapAlloc OOM) 시 불리는 훅. 기본은 아무것도 안 하고 Alloc이 nullptr을
+// 반환한다 — 라이브러리는 정책을 정하지 않는다.
+// 다만 호출자가 Alloc/Push/Enqueue의 실패를 무시하는 코드베이스에서는 OOM이 "조용한 유실"이
+// 되므로, 그런 쪽은 include 전에 이 매크로를 즉시 종료(덤프 등)로 정의해 원인 지점에서
+// 죽게 만들 수 있다.  예) #define LF_ON_ALLOC_FAIL(msg) CRASH(msg)
+#ifndef LF_ON_ALLOC_FAIL
+#define LF_ON_ALLOC_FAIL(msg) ((void)0)
+#endif
+
 namespace LockFree
 {
 		template<typename T, bool PlacementNew = false, bool UseApproxSize = false>
@@ -94,32 +103,45 @@ namespace LockFree
 			CInternalFreeList(CInternalFreeList&&) = delete;
 			CInternalFreeList& operator=(CInternalFreeList&&) = delete;
 
-			bool Init()
+			// initialCapacity: 미리 만들어 free list에 적재해둘 노드 수. 첫 Alloc들이 HeapAlloc
+			//   없이 처리된다. 생성자가 이미 Init()을 부르므로 초기화는 한 번만 일어나고,
+			//   이후 Init(n)을 다시 부르면 "초기화는 건너뛰고 n개만 추가 적재"한다.
+			bool Init(int initialCapacity = 0)
 			{
-				if (this->_Initialized)
-					return true;
-
-				this->_pTopNode = (TopNODE*)_aligned_malloc(64, 64);
-				if (this->_pTopNode == nullptr)
-					return false;
-
-				this->_pTopNode->pNode = nullptr;
-				this->_pTopNode->UniqueCount = 0;
-
-				hHeap = HeapCreate(NULL, 0, NULL);
-				if (hHeap == nullptr)
+				if (this->_Initialized == false)
 				{
-					_aligned_free((void*)this->_pTopNode);
-					this->_pTopNode = nullptr;
-					return false;
+					this->_pTopNode = (TopNODE*)_aligned_malloc(64, 64);
+					if (this->_pTopNode == nullptr)
+						return false;
+
+					this->_pTopNode->pNode = nullptr;
+					this->_pTopNode->UniqueCount = 0;
+
+					hHeap = HeapCreate(NULL, 0, NULL);
+					if (hHeap == nullptr)
+					{
+						_aligned_free((void*)this->_pTopNode);
+						this->_pTopNode = nullptr;
+						return false;
+					}
+
+					// 저단편화 힙(LFH) 설정
+					ULONG HeapInformationValue = 2;
+					HeapSetInformation(hHeap, HeapCompatibilityInformation,
+						&HeapInformationValue, sizeof(HeapInformationValue));
+
+					this->_Initialized = true;
 				}
 
-				// 저단편화 힙(LFH) 설정
-				ULONG HeapInformationValue = 2;
-				HeapSetInformation(hHeap, HeapCompatibilityInformation,
-					&HeapInformationValue, sizeof(HeapInformationValue));
+				// 사전 적재: 만들어서 곧바로 반납하면 free list에 쌓인다.
+				for (int i = 0; i < initialCapacity; ++i)
+				{
+					T* data = AllocNewNode();
+					if (data == nullptr)
+						return false;
+					Free(data);
+				}
 
-				this->_Initialized = true;
 				return true;
 			}
 
@@ -219,7 +241,10 @@ namespace LockFree
 				// TODO : 더 최적화하고자 한다면 virtualAlloc
 				NODE* rNode = (NODE*)HeapAlloc(this->hHeap, FALSE, sizeof(NODE));
 				if (rNode == nullptr)
+				{
+					LF_ON_ALLOC_FAIL("CInternalFreeList: HeapAlloc failed - out of memory");
 					return nullptr;
+				}
 
 				new(&rNode->Data) T;
 				rNode->pNextNode = nullptr;

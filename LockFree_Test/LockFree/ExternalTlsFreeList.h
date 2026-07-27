@@ -129,38 +129,69 @@ public:
 		delete this->_ChunkFreeList;
 	}
 
-	bool Init()
+	// initialCapacity: 미리 확보해둘 "슬롯(원소) 수". 청크 단위로 올림해서 워밍업한다.
+	//   0이면 생성자에서 받은 warmupChunkCount(청크 단위)를 쓴다.
+	//   생성자가 이미 Init()을 부르므로, 나중에 Init(n)을 다시 부르면 초기화는 건너뛰고
+	//   n개 분량의 청크만 추가로 워밍업한다.
+	bool Init(int initialCapacity = 0)
 	{
-		if (this->_Initialized)
-			return true;
-
-		this->_ChunkFreeList = new ChunkPool;
-		if (this->_ChunkFreeList == nullptr)
-			return false;
-
-		this->TlsIndex = TlsAlloc();
-		if (this->TlsIndex == TLS_OUT_OF_INDEXES)
-			return false;
-
-		// 워밍업: 청크 N개를 미리 free list에 적재 (일괄 Alloc 후 일괄 Free해야 서로 다른 N개가 쌓임)
-		if (this->_WarmupChunkCount > 0)
+		if (this->_Initialized == false)
 		{
-			ChunkNODE** pWarmup = new(std::nothrow) ChunkNODE*[this->_WarmupChunkCount];
-			if (pWarmup != nullptr)
+			this->_ChunkFreeList = new(std::nothrow) ChunkPool;
+			if (this->_ChunkFreeList == nullptr)
+				return false;
+
+			this->TlsIndex = TlsAlloc();
+			if (this->TlsIndex == TLS_OUT_OF_INDEXES)
 			{
-				for (int i = 0; i < this->_WarmupChunkCount; ++i)
-					pWarmup[i] = this->_ChunkFreeList->Alloc();
-
-				for (int i = 0; i < this->_WarmupChunkCount; ++i)
-					this->_ChunkFreeList->Free(pWarmup[i]);	// nullptr는 Free 내부에서 무시됨
-
-				delete[] pWarmup;
+				delete this->_ChunkFreeList;
+				this->_ChunkFreeList = nullptr;
+				return false;
 			}
+
+			this->_Initialized = true;
+			if (Warmup(this->_WarmupChunkCount) == false)
+				return false;
 		}
 
-		this->_Initialized = true;
+		if (initialCapacity > 0)
+		{
+			if (Warmup((initialCapacity + CHUNK_SIZE - 1) / CHUNK_SIZE) == false)
+				return false;
+		}
+
 		return true;
 	}
+
+private:
+	// 청크 N개를 미리 free list에 적재 (일괄 Alloc 후 일괄 Free해야 서로 다른 N개가 쌓인다).
+	// 요청한 만큼 확보하지 못하면 false를 돌려준다 — 호출자는 "요청한 사전 확보량이 실제로
+	// 잡혔다"를 보고 기동 여부를 정하기 때문이다. 확보된 것은 free list에 남기고 실패만 알린다.
+	bool Warmup(int chunkCount)
+	{
+		if (chunkCount <= 0)
+			return true;
+
+		ChunkNODE** pWarmup = new(std::nothrow) ChunkNODE*[chunkCount];
+		if (pWarmup == nullptr)
+			return false;
+
+		bool ok = true;
+		for (int i = 0; i < chunkCount; ++i)
+		{
+			pWarmup[i] = this->_ChunkFreeList->Alloc();
+			if (pWarmup[i] == nullptr)
+				ok = false;
+		}
+
+		for (int i = 0; i < chunkCount; ++i)
+			this->_ChunkFreeList->Free(pWarmup[i]);	// nullptr는 Free 내부에서 무시됨
+
+		delete[] pWarmup;
+		return ok;
+	}
+
+public:
 
 
 public:
