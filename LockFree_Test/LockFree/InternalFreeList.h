@@ -5,10 +5,9 @@
 #define ____INTERNAL_FREE_LIST_H____
 
 
-#include <windows.h>
+#include "LockFreeCompat.h"   // Windows 원자연산·타입·힙 API의 플랫폼 경계 (Win=windows.h/intrin.h)
 #include <new>
 #include <atomic>
-#include <intrin.h>
 #include <cassert>
 
 // 경합 창 증폭 훅 (검증 훅) — 상세 설명은 LockFreeQueue.h 동일 블록 참고.

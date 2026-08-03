@@ -17,12 +17,16 @@
 #ifdef _WIN32
 
 #include <windows.h>
+#include <intrin.h>   // InterlockedCompareExchange128 등 (원본이 직접 include하던 것)
 
 #else   // ────────────── 리눅스 (GCC / Clang) ──────────────
 
 #include <cstdint>
 #include <cstring>
+#include <cstddef>   // offsetof (Windows에서는 windows.h가 끌어오던 것)
 #include <cstdlib>   // malloc / free / posix_memalign
+#include <sched.h>   // sched_yield
+#include <pthread.h> // 스레드 지역 저장소(TLS)
 
 // ── 스칼라 타입 ──
 //   MSVC의 __int64는 long long이다. LP64 리눅스에서는 long도 64비트지만,
@@ -215,6 +219,45 @@ __forceinline void* _aligned_malloc(std::size_t size, std::size_t alignment)
 __forceinline void _aligned_free(void* p)
 {
     std::free(p);
+}
+
+// ── 스레드 양보 ──
+//   경합 백오프의 마지막 단계. YieldProcessor(스핀 힌트)로 안 풀리면 스케줄러에 넘긴다.
+__forceinline int SwitchToThread()
+{
+    return (sched_yield() == 0) ? 1 : 0;
+}
+
+// ── 스레드 지역 저장소(TLS) ──
+//   호출부가 인덱스를 int로 들고 있어(ExternalTlsFreeList.h `int TlsIndex`) 무효값도 int로 맞춘다.
+//   Windows의 TLS_OUT_OF_INDEXES(0xFFFFFFFF)를 int에 담으면 -1이므로 값 자체는 그대로인 셈이다.
+//   pthread_key_t는 리눅스에서 unsigned int이고 실제 값은 작아 int로 왕복해도 안전하다.
+//
+//   [차이] Windows TlsAlloc에는 소멸자 개념이 없다. pthread_key_create의 소멸자 인자도
+//   nullptr로 둬서 동작을 맞춘다 — 청크 회수는 호출부가 직접 한다.
+enum : int { TLS_OUT_OF_INDEXES = -1 };
+
+__forceinline int TlsAlloc()
+{
+    pthread_key_t key;
+    if (pthread_key_create(&key, nullptr) != 0)
+        return TLS_OUT_OF_INDEXES;
+    return static_cast<int>(key);
+}
+
+__forceinline int TlsFree(int index)
+{
+    return (pthread_key_delete(static_cast<pthread_key_t>(index)) == 0) ? 1 : 0;
+}
+
+__forceinline void* TlsGetValue(int index)
+{
+    return pthread_getspecific(static_cast<pthread_key_t>(index));
+}
+
+__forceinline int TlsSetValue(int index, void* value)
+{
+    return (pthread_setspecific(static_cast<pthread_key_t>(index), value) == 0) ? 1 : 0;
 }
 
 #endif  // _WIN32
