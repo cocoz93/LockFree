@@ -170,8 +170,9 @@ __forceinline SHORT InterlockedDecrement16(volatile SHORT* addend)
 //   (원본도 같은 자리에서 "T 소멸자 미호출"을 이미 인정하고 주석에 남겨 두었다)
 
 using HANDLE = void*;
-using ULONG  = unsigned long;
-using DWORD  = unsigned long;
+// 폭은 Windows 정의를 따른다 — 리눅스 LP64에서 unsigned long은 64비트라 그대로 쓰면 어긋난다.
+using ULONG  = std::uint32_t;
+using DWORD  = std::uint32_t;
 
 // 전용 힙이 없으므로 핸들은 "만들어졌다"는 표식일 뿐이다.
 //   호출부가 nullptr 검사로 실패를 판정하므로 nullptr이 아닌 값을 돌려준다.
