@@ -33,13 +33,22 @@ static void ClearScreen()
 //   빌드 예: cl /O2 /DNDEBUG /DUSE_RACE_HOOK /std:c++17 /EHsc TestCode.cpp
 //=============================================================================
 #ifdef USE_RACE_HOOK
-#include <windows.h>
+#include <functional>   // std::hash — 스레드별 시드 (Win/리눅스 공통)
 static thread_local unsigned t_raceRng = 0;
+
+// 스레드마다 다른 시드를 만든다. GetCurrentThreadId 대신 표준 스레드 id 해시를 쓰면
+//   양 OS가 같은 코드로 돌고, 필요한 성질(스레드별로 다른 값)도 그대로다.
+static unsigned RaceSeed(unsigned salt)
+{
+    const unsigned tid = static_cast<unsigned>(
+        std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    return tid * 2654435761u + salt;
+}
 static void RaceStall()
 {
     // xorshift 난수로 스레드마다 스톨 타이밍을 다르게 섞는다 (전부 같이 멈추면 경합이 안 생김)
     unsigned x = t_raceRng;
-    if (x == 0) x = GetCurrentThreadId() * 2654435761u + 97u;
+    if (x == 0) x = RaceSeed(97u);
     x ^= x << 13; x ^= x >> 17; x ^= x << 5;
     t_raceRng = x;
     if ((x & 7u) == 0u)                        // 1/8 확률로만 스톨
@@ -54,7 +63,7 @@ static void RaceStall()
 static void RaceStallEnq()
 {
     unsigned x = t_raceRng;
-    if (x == 0) x = GetCurrentThreadId() * 2654435761u + 101u;
+    if (x == 0) x = RaceSeed(101u);
     x ^= x << 13; x ^= x >> 17; x ^= x << 5;
     t_raceRng = x;
     if ((x & 3u) == 0u)                        // 1/4 확률로 스톨
