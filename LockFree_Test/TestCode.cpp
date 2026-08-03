@@ -13,6 +13,18 @@
 #include <unordered_set>
 #include <cstdlib>
 
+// 화면 지우기 — 진행 표시를 갱신할 때만 쓴다. 실패해도 할 일이 없어 반환값을 버린다
+//   (리눅스 glibc의 system()에 warn_unused_result가 붙어 있어, 그냥 두면 호출마다 경고가 쌓인다).
+static void ClearScreen()
+{
+#ifdef _WIN32
+    const int rc = system("cls");
+#else
+    const int rc = system("clear");
+#endif
+    (void)rc;
+}
+
 //=============================================================================
 // 경합 창 증폭 훅 (USE_RACE_HOOK 빌드 전용)
 // 자료구조 헤더의 LF_RACE_HOOK()를 "1/8 확률 ~1µs 헛돌기"로 재정의한다.
@@ -572,11 +584,7 @@ void RunFreeListMTTest(
         {
             if (!pauseProgress)
             {
-#ifdef _WIN32
-                system("cls");
-#else
-                system("clear");
-#endif
+                ClearScreen();
                 std::cout << "========================================" << std::endl;
                 std::cout << "[Phase 2-1] FreeList 멀티스레드 정합성 테스트" << std::endl;
                 std::cout << "========================================" << std::endl;
@@ -730,11 +738,7 @@ void FreeList_Test_MT_AllocFree()
         completedLines.push_back("[" + threadConfigs[i].second + "] Alloc/Free 정합성 테스트 완료");
     }
 
-#ifdef _WIN32
-    system("cls");
-#else
-    system("clear");
-#endif
+    ClearScreen();
     std::cout << "========================================" << std::endl;
     for (const auto& line : completedLines)
         std::cout << line << std::endl;
@@ -776,11 +780,7 @@ void RunFreeListHighContentionTest(
         {
             if (!pauseProgress)
             {
-#ifdef _WIN32
-                system("cls");
-#else
-                system("clear");
-#endif
+                ClearScreen();
                 std::cout << "========================================" << std::endl;
                 std::cout << "[Phase 2-2] FreeList 고빈도 경합 + corruption 감지" << std::endl;
                 std::cout << "========================================" << std::endl;
@@ -961,11 +961,7 @@ void FreeList_Test_HighContention()
         completedLines.push_back("[" + std::to_string(threadCount) + "개 스레드] 고빈도 경합 테스트 완료");
     }
 
-#ifdef _WIN32
-    system("cls");
-#else
-    system("clear");
-#endif
+    ClearScreen();
     std::cout << "========================================" << std::endl;
     for (const auto& line : completedLines)
         std::cout << line << std::endl;
@@ -1167,11 +1163,7 @@ void RunStackMTTest(
         {
             if (!pauseProgress)
             {
-#ifdef _WIN32
-                system("cls");
-#else
-                system("clear");
-#endif
+                ClearScreen();
                 std::cout << "========================================" << std::endl;
                 std::cout << "[Stack 2-1] Push/Pop 정합성 테스트" << std::endl;
                 std::cout << "========================================" << std::endl;
@@ -1317,11 +1309,7 @@ void Stack_Test_MT_PushPop()
         completedLines.push_back("[" + std::to_string(pc) + "-" + std::to_string(cc) + "] 조합 테스트 완료");
     }
 
-#ifdef _WIN32
-    system("cls");
-#else
-    system("clear");
-#endif
+    ClearScreen();
     std::cout << "========================================" << std::endl;
     for (const auto& line : completedLines)
         std::cout << line << std::endl;
@@ -1354,11 +1342,7 @@ void RunStackHighContentionTest(
         {
             if (!pauseProgress)
             {
-#ifdef _WIN32
-                system("cls");
-#else
-                system("clear");
-#endif
+                ClearScreen();
                 std::cout << "========================================" << std::endl;
                 std::cout << "[Stack 2-2] 고빈도 경합 + corruption 감지" << std::endl;
                 std::cout << "========================================" << std::endl;
@@ -1471,11 +1455,7 @@ void Stack_Test_HighContention()
         completedLines.push_back("[" + std::to_string(tc) + "개 스레드] Stack 고빈도 경합 완료");
     }
 
-#ifdef _WIN32
-    system("cls");
-#else
-    system("clear");
-#endif
+    ClearScreen();
     std::cout << "========================================" << std::endl;
     for (const auto& line : completedLines)
         std::cout << line << std::endl;
@@ -1694,11 +1674,7 @@ void RunQueueProducerConsumerTest(
         {
             if (!pauseProgress)
             {
-#ifdef _WIN32
-                system("cls");
-#else
-                system("clear");
-#endif
+                ClearScreen();
                 std::cout << "========================================" << std::endl;
                 std::cout << "[Queue 2-1] Producer-Consumer 정합성 테스트" << std::endl;
                 std::cout << "========================================" << std::endl;
@@ -1848,11 +1824,7 @@ void Queue_Test_ProducerConsumer()
         completedLines.push_back("[" + std::to_string(pc) + "-" + std::to_string(cc) + "] 조합 테스트 완료");
     }
 
-#ifdef _WIN32
-    system("cls");
-#else
-    system("clear");
-#endif
+    ClearScreen();
     std::cout << "========================================" << std::endl;
     for (const auto& line : completedLines)
         std::cout << line << std::endl;
@@ -1885,11 +1857,7 @@ void RunQueueHighContentionTest(
         {
             if (!pauseProgress)
             {
-#ifdef _WIN32
-                system("cls");
-#else
-                system("clear");
-#endif
+                ClearScreen();
                 std::cout << "========================================" << std::endl;
                 std::cout << "[Queue 2-2] 고빈도 경합 + corruption 감지" << std::endl;
                 std::cout << "========================================" << std::endl;
@@ -2002,11 +1970,7 @@ void Queue_Test_HighContention()
         completedLines.push_back("[" + std::to_string(tc) + "개 스레드] Queue 고빈도 경합 완료");
     }
 
-#ifdef _WIN32
-    system("cls");
-#else
-    system("clear");
-#endif
+    ClearScreen();
     std::cout << "========================================" << std::endl;
     for (const auto& line : completedLines)
         std::cout << line << std::endl;
